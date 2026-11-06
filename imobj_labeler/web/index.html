@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>imObj Labeler</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">imObj Labeler</div>
+  <nav class="modes" id="modes">
+    <button data-mode="label" class="active" title="Draw and register bounding boxes">Labeling</button>
+    <button data-mode="predict" title="Run a YOLO model, review/edit, register">Prediction</button>
+  </nav>
+  <div class="folder">
+    <button id="btn-open">Open folder…</button>
+    <span id="folder-path" class="path muted">No folder open</span>
+  </div>
+  <div class="spacer"></div>
+  <button id="btn-classes">Classes…</button>
+  <button id="btn-dataset">Dataset…</button>
+  <button id="btn-help" title="Keyboard shortcuts">?</button>
+</header>
+
+<div class="layout">
+  <aside class="left">
+    <div class="pane-head">
+      <input id="file-filter" type="search" placeholder="Filter files">
+      <select id="file-show" title="Show">
+        <option value="all">All</option>
+        <option value="todo">Unregistered</option>
+        <option value="done">Registered</option>
+      </select>
+    </div>
+    <div id="file-count" class="muted small"></div>
+    <ul id="file-list" class="file-list"></ul>
+  </aside>
+
+  <main>
+    <div class="viewer-bar">
+      <span id="cur-name" class="cur-name">—</span>
+      <span id="cur-status" class="chip"></span>
+      <span class="spacer"></span>
+      <button id="btn-prev" title="Previous (A)">◀</button>
+      <button id="btn-next" title="Next (D)">▶</button>
+      <button id="btn-fit" title="Fit to view (F)">Fit</button>
+      <label class="toggle"><input type="checkbox" id="chk-show" checked> Boxes (H)</label>
+      <label class="toggle"><input type="checkbox" id="chk-labels" checked> Tags</label>
+    </div>
+    <div id="viewer" class="viewer">
+      <canvas id="canvas"></canvas>
+      <div id="empty" class="empty">Open a folder to start labeling.</div>
+    </div>
+    <div class="statusbar">
+      <span id="st-pos"></span>
+      <span id="st-size"></span>
+      <span class="spacer"></span>
+      <span id="st-msg"></span>
+    </div>
+  </main>
+
+  <aside class="right">
+    <section>
+      <h3>Display</h3>
+      <div class="grid2">
+        <label>Channel</label><select id="p-channel"></select>
+        <label>Flatten</label><select id="p-flatten"></select>
+        <label>Colormap</label><select id="p-cmap"></select>
+        <label>Clip %</label>
+        <span class="row"><input id="p-lo" type="number" min="0" max="100" step="0.5" value="1">
+          <input id="p-hi" type="number" min="0" max="100" step="0.5" value="99"></span>
+      </div>
+      <div id="p-note" class="muted small"></div>
+    </section>
+
+    <section id="predict-panel" class="hidden">
+      <h3>Model</h3>
+      <div class="row"><input id="m-folder" type="text" placeholder="Models folder (contains *.pt)">
+        <button id="m-scan">Scan</button></div>
+      <select id="m-select"></select>
+      <div id="m-info" class="muted small"></div>
+      <div id="m-warn" class="warn small hidden"></div>
+      <div class="grid2">
+        <label>Confidence</label><span class="row"><input id="m-conf" type="range" min="0.01" max="0.99" step="0.01" value="0.25"><output id="m-conf-v">0.25</output></span>
+        <label>IoU (NMS)</label><span class="row"><input id="m-iou" type="range" min="0.1" max="0.95" step="0.05" value="0.7"><output id="m-iou-v">0.70</output></span>
+        <label>Image size</label><input id="m-imgsz" type="number" min="32" step="32" placeholder="model default">
+      </div>
+      <label class="toggle"><input type="checkbox" id="m-auto" checked> Auto-predict unregistered files</label>
+      <button id="m-run" class="primary-outline">Predict (P)</button>
+    </section>
+
+    <section>
+      <h3>Classes <span class="muted small">(keys 1–9)</span></h3>
+      <div id="class-list" class="class-list"></div>
+    </section>
+
+    <section class="grow">
+      <h3>Objects <span id="obj-count" class="muted"></span>
+        <button id="btn-clear" class="link">clear</button></h3>
+      <ul id="obj-list" class="obj-list"></ul>
+    </section>
+
+    <section class="register">
+      <label class="toggle"><input type="checkbox" id="chk-advance" checked> Go to next after registering</label>
+      <button id="btn-register" class="primary">Register (Ctrl+S)</button>
+      <button id="btn-unregister" class="link danger hidden">unregister this file</button>
+      <div id="out-path" class="muted small path"></div>
+    </section>
+  </aside>
+</div>
+
+<!-- dialogs -->
+<dialog id="dlg-folder">
+  <h3>Open data folder</h3>
+  <div class="row"><input id="fb-path" type="text"><button id="fb-go">Go</button></div>
+  <div id="fb-drives" class="row small"></div>
+  <ul id="fb-list" class="fb-list"></ul>
+  <div class="row"><span id="fb-count" class="muted small"></span><span class="spacer"></span>
+    <button id="fb-cancel">Cancel</button><button id="fb-open" class="primary">Open this folder</button></div>
+</dialog>
+
+<dialog id="dlg-classes">
+  <h3>Classes <span class="muted small">— saved to obj_det_labels/classes.json</span></h3>
+  <table class="cls-table"><thead><tr><th>ID</th><th>Name</th><th>Color</th><th></th></tr></thead>
+    <tbody id="cls-body"></tbody></table>
+  <div class="row"><button id="cls-add">+ Add class</button><span class="spacer"></span></div>
+  <div id="cls-err" class="warn small"></div>
+  <div class="row"><span class="spacer"></span><button id="cls-cancel">Cancel</button><button id="cls-save" class="primary">Save</button></div>
+</dialog>
+
+<dialog id="dlg-dataset">
+  <h3>Dataset (data.yaml)</h3>
+  <p class="muted small">data.yaml is refreshed on every registration (train = val = all images).
+    Optionally write a random train/val split.</p>
+  <div class="grid2">
+    <label>Validation fraction</label><input id="ds-val" type="number" min="0" max="0.9" step="0.05" value="0.2">
+    <label>Seed</label><input id="ds-seed" type="number" value="0">
+  </div>
+  <div id="ds-msg" class="small"></div>
+  <div class="row"><span class="spacer"></span><button id="ds-close">Close</button><button id="ds-build" class="primary">Write split</button></div>
+</dialog>
+
+<dialog id="dlg-help">
+  <h3>Shortcuts</h3>
+  <table class="keys">
+    <tr><td>Drag on image</td><td>Draw a new box (current class)</td></tr>
+    <tr><td>Click / drag box</td><td>Select / move · drag handles to resize</td></tr>
+    <tr><td>Right/middle drag, Space+drag</td><td>Pan · wheel to zoom</td></tr>
+    <tr><td>1–9</td><td>Set current class (and of the selected box)</td></tr>
+    <tr><td>Del / Backspace</td><td>Delete selected box</td></tr>
+    <tr><td>Arrows</td><td>Nudge selected box (Shift = 10 px) · otherwise prev/next</td></tr>
+    <tr><td>Tab</td><td>Select next box</td></tr>
+    <tr><td>A / D</td><td>Previous / next file</td></tr>
+    <tr><td>Ctrl+S / Enter</td><td>Register</td></tr>
+    <tr><td>Ctrl+Z / Ctrl+Y</td><td>Undo / redo</td></tr>
+    <tr><td>P</td><td>Predict (Prediction mode)</td></tr>
+    <tr><td>F · H · Esc</td><td>Fit view · toggle boxes · deselect</td></tr>
+  </table>
+  <p class="muted small">Dashed boxes are unreviewed model predictions; editing one marks it as edited.</p>
+  <div class="row"><span class="spacer"></span><button id="help-close">Close</button></div>
+</dialog>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

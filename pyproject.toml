@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imobj-labeler"
+version = "0.1.0"
+description = "Browser-based bounding-box labeler and YOLO prediction reviewer for microscopy images (SXM, PNG, JPG, TIFF)"
+readme = "readme.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pillow",
+    "matplotlib",
+    "fastapi",
+    "uvicorn",
+    "SciFiReaders @ git+https://github.com/gnganesh99/SciFiReaders.git",
+]
+
+[project.optional-dependencies]
+predict = ["ultralytics>=8.3"]
+dev = ["pytest"]
+
+[project.scripts]
+imobj-labeler = "imobj_labeler.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["imobj_labeler*"]
+
+[tool.setuptools.package-data]
+imobj_labeler = ["web/*"]

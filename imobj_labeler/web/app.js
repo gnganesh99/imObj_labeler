@@ -1,0 +1,642 @@
+import { BoxEditor, touch, isTyping } from "./canvas.js";
+
+const $ = (id) => document.getElementById(id);
+const PARAM_KEYS = ["channel", "flatten", "cmap", "lo", "hi"];
+
+const S = {
+  mode: "label",
+  folder: null,
+  out: null,
+  files: [],              // [{name, registered}]
+  classes: { classes: [] },
+  curClass: 0,
+  params: { channel: null, flatten: "plane", cmap: "viridis", lo: 1, hi: 99 }, // global defaults
+  doc: null,              // current file: {name, anns, params, dirty, registered, undo, redo, snap, info}
+  drafts: new Map(),      // name -> doc with unsaved edits
+  model: null,            // {path, name}
+  modelInfo: null,
+  loadToken: 0,
+};
+
+// ---------------------------------------------------------------- helpers
+async function api(path, opts = {}) {
+  const init = { ...opts };
+  if (opts.json !== undefined) {
+    init.body = JSON.stringify(opts.json);
+    init.headers = { "Content-Type": "application/json" };
+    init.method = opts.method || "POST";
+  }
+  const r = await fetch(path, init);
+  if (!r.ok) {
+    let d = r.statusText;
+    try { d = (await r.json()).detail || d; } catch { /* ignore */ }
+    throw new Error(typeof d === "string" ? d : JSON.stringify(d));
+  }
+  return r.json();
+}
+function qs(o) {
+  return new URLSearchParams(Object.entries(o).filter(([, v]) => v !== null && v !== undefined && v !== "")).toString();
+}
+let msgTimer;
+function msg(text, kind = "") {
+  const el = $("st-msg");
+  el.textContent = text; el.className = kind;
+  clearTimeout(msgTimer);
+  if (kind !== "err") msgTimer = setTimeout(() => { el.textContent = ""; }, 6000);
+}
+function fail(e) { console.error(e); msg(e.message || String(e), "err"); }
+function clone(x) { return JSON.parse(JSON.stringify(x)); }
+
+function classInfo(id) {
+  const c = S.classes.classes.find((c) => c.id === id);
+  return c ? c : { id, name: `cls ${id}?`, color: "#9aa0a6" };
+}
+
+// ---------------------------------------------------------------- editor
+const editor = new BoxEditor($("canvas"), {
+  onChange: () => commit(),
+  onSelect: () => renderObjects(),
+  onCursor: (p) => { $("st-pos").textContent = p ? `x ${p[0].toFixed(1)}  y ${p[1].toFixed(1)}` : ""; },
+  getClass: () => S.curClass,
+  classInfo,
+});
+
+function commit() {
+  const d = S.doc;
+  if (!d) return;
+  d.undo.push(d.snap);
+  if (d.undo.length > 200) d.undo.shift();
+  d.redo = [];
+  d.snap = JSON.stringify(d.anns);
+  d.dirty = true;
+  refreshDocUI();
+}
+function undo(redo = false) {
+  const d = S.doc;
+  if (!d) return;
+  const from = redo ? d.redo : d.undo, to = redo ? d.undo : d.redo;
+  if (!from.length) return;
+  to.push(d.snap);
+  d.snap = from.pop();
+  d.anns = JSON.parse(d.snap);
+  d.dirty = true;
+  editor.setAnnotations(d.anns);
+  editor.select(-1);
+  refreshDocUI();
+}
+
+// ---------------------------------------------------------------- files
+async function loadFiles(selectName) {
+  const r = await api("/api/files");
+  S.files = r.files;
+  renderFiles();
+  $("empty").textContent = S.files.length ? "" : "No supported files (.sxm, .png, .jpg, .tif, .bmp) in this folder.";
+  $("empty").classList.toggle("hidden", !!S.files.length);
+  const target = selectName || (S.files.find((f) => !f.registered) || S.files[0] || {}).name;
+  if (target) await openFile(target);
+}
+
+function visibleFiles() {
+  const q = $("file-filter").value.trim().toLowerCase(), show = $("file-show").value;
+  return S.files.filter((f) => (!q || f.name.toLowerCase().includes(q)) &&
+    (show === "all" || (show === "done") === f.registered));
+}
+
+function renderFiles() {
+  const ul = $("file-list");
+  ul.innerHTML = "";
+  for (const f of visibleFiles()) {
+    const li = document.createElement("li");
+    li.textContent = f.name;
+    li.title = f.name;
+    li.dataset.name = f.name;
+    li.classList.toggle("done", f.registered);
+    li.classList.toggle("draft", S.drafts.has(f.name) || (S.doc?.name === f.name && S.doc.dirty));
+    li.classList.toggle("active", S.doc?.name === f.name);
+    li.onclick = () => openFile(f.name).catch(fail);
+    ul.appendChild(li);
+  }
+  const n = S.files.filter((f) => f.registered).length;
+  $("file-count").textContent = S.files.length ? `${n} / ${S.files.length} registered` : "";
+  ul.querySelector("li.active")?.scrollIntoView({ block: "nearest" });
+}
+
+function stashDoc() {
+  const d = S.doc;
+  if (!d) return;
+  if (d.dirty) S.drafts.set(d.name, d); else S.drafts.delete(d.name);
+}
+
+async function openFile(name, { keepView = false, reloadImageOnly = false } = {}) {
+  const token = ++S.loadToken;
+  let d;
+  if (reloadImageOnly && S.doc?.name === name) {
+    d = S.doc;
+  } else {
+    stashDoc();
+    d = S.drafts.get(name);
+    const q = d ? { name, ...d.params, use_registered: false } : { name, ...S.params, use_registered: true };
+    const fi = await api(`/api/file?${qs(q)}`);
+    if (token !== S.loadToken) return;
+    const isNew = !d;
+    if (!d) {
+      d = { name, anns: fi.labels, params: fi.params, dirty: false, undo: [], redo: [], snap: "" };
+      d.snap = JSON.stringify(d.anns);
+    }
+    d.registered = fi.registered;
+    d.info = fi.info;
+    d.usedRegistered = fi.used_registered_params;
+    d.params.channel = fi.params.channel;
+    S.doc = d;
+    if (isNew && S.mode === "predict" && !fi.registered && !fi.labels.length && $("m-auto").checked && S.model) {
+      d._autoPredict = true;
+    }
+  }
+  setParamControls(d);
+  const img = await loadImage(`/api/image?${qs({ name, ...d.params })}`);
+  if (token !== S.loadToken) return;
+  editor.setImage(img, keepView || reloadImageOnly);
+  editor.setAnnotations(d.anns);
+  if (!reloadImageOnly) editor.select(-1);
+  $("st-size").textContent = `${img.naturalWidth} × ${img.naturalHeight} px`;
+  refreshDocUI();
+  if (d._autoPredict) { d._autoPredict = false; await predict(); }
+}
+
+function loadImage(src) {
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = async () => {
+      try { const r = await fetch(src); const j = await r.json(); rej(new Error(j.detail || "image load failed")); }
+      catch { rej(new Error("image load failed")); }
+    };
+    im.src = src;
+  });
+}
+
+function step(delta) {
+  const list = visibleFiles();
+  if (!list.length) return;
+  const i = list.findIndex((f) => f.name === S.doc?.name);
+  const j = i < 0 ? 0 : Math.min(Math.max(i + delta, 0), list.length - 1);
+  if (list[j] && list[j].name !== S.doc?.name) openFile(list[j].name).catch(fail);
+}
+
+// ---------------------------------------------------------------- doc UI
+function refreshDocUI() {
+  const d = S.doc;
+  $("cur-name").textContent = d ? d.name : "—";
+  const chip = $("cur-status");
+  chip.className = "chip";
+  if (!d) chip.textContent = "";
+  else if (d.dirty) { chip.textContent = d.registered ? "modified" : "unsaved"; chip.classList.add("dirty"); }
+  else if (d.registered) { chip.textContent = "registered"; chip.classList.add("done"); }
+  else chip.textContent = d.anns.some((a) => a.source === "existing") ? "existing labels" : "new";
+  $("btn-unregister").classList.toggle("hidden", !d?.registered);
+  renderObjects();
+  renderFiles();
+}
+
+function setParamControls(d) {
+  const sel = $("p-channel");
+  sel.innerHTML = "";
+  const chans = d.info?.channels || [];
+  for (const c of chans) sel.add(new Option(c, c));
+  sel.disabled = !chans.length;
+  if (!chans.length) sel.add(new Option("RGB image", ""));
+  sel.value = d.params.channel || "";
+  for (const id of ["p-flatten", "p-cmap", "p-lo", "p-hi"]) $(id).disabled = d.info?.kind === "rgb";
+  $("p-flatten").value = d.params.flatten;
+  $("p-cmap").value = d.params.cmap;
+  $("p-lo").value = d.params.lo;
+  $("p-hi").value = d.params.hi;
+  const notes = [];
+  if (d.info?.kind === "rgb") notes.push("RGB image: shown and saved as is.");
+  if (d.info?.fallback) notes.push("Requested channel missing: using the first channel.");
+  if (d.usedRegistered) notes.push("Showing the settings used when this file was registered.");
+  $("p-note").textContent = notes.join(" ");
+}
+
+function onParamChange() {
+  const d = S.doc;
+  if (!d) return;
+  const p = {
+    channel: $("p-channel").value || null, flatten: $("p-flatten").value, cmap: $("p-cmap").value,
+    lo: parseFloat($("p-lo").value), hi: parseFloat($("p-hi").value),
+  };
+  if (!(p.lo >= 0 && p.hi <= 100 && p.lo < p.hi)) { msg("Clip needs 0 ≤ low < high ≤ 100", "err"); return; }
+  d.params = p;
+  Object.assign(S.params, p);
+  d.usedRegistered = false;
+  if (d.registered) { d.dirty = true; }
+  openFile(d.name, { reloadImageOnly: true }).catch(fail);
+}
+
+// ---------------------------------------------------------------- classes
+async function loadClasses() {
+  S.classes = await api("/api/classes");
+  if (!S.classes.classes.some((c) => c.id === S.curClass)) S.curClass = S.classes.classes[0]?.id ?? 0;
+  renderClasses();
+  editor.draw();
+  renderObjects();
+}
+
+function renderClasses() {
+  const box = $("class-list");
+  box.innerHTML = "";
+  S.classes.classes.forEach((c, i) => {
+    const b = document.createElement("button");
+    b.innerHTML = `<span class="swatch" style="background:${c.color}"></span>${esc(c.name)}` +
+      (i < 9 ? ` <span class="kbd">${i + 1}</span>` : "");
+    b.classList.toggle("active", c.id === S.curClass);
+    b.onclick = () => setClass(c.id);
+    box.appendChild(b);
+  });
+}
+
+function setClass(id) {
+  S.curClass = id;
+  renderClasses();
+  const a = S.doc?.anns[editor.sel];
+  if (a && a.cls !== id) { a.cls = id; touch(a); commit(); editor.draw(); }
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// ---------------------------------------------------------------- objects
+function renderObjects() {
+  const ul = $("obj-list"), d = S.doc;
+  ul.innerHTML = "";
+  if (!d) { $("obj-count").textContent = ""; return; }
+  $("obj-count").textContent = `(${d.anns.length})`;
+  d.anns.forEach((a, i) => {
+    const li = document.createElement("li");
+    li.classList.toggle("sel", i === editor.sel);
+    const sw = document.createElement("span");
+    sw.className = "swatch"; sw.style.background = classInfo(a.cls).color;
+    const s = document.createElement("select");
+    const ids = new Set(S.classes.classes.map((c) => c.id));
+    for (const c of S.classes.classes) s.add(new Option(c.name, c.id));
+    if (!ids.has(a.cls)) s.add(new Option(`cls ${a.cls}?`, a.cls));
+    s.value = a.cls;
+    s.onclick = (e) => e.stopPropagation();
+    s.onchange = () => { a.cls = parseInt(s.value, 10); touch(a); commit(); editor.draw(); };
+    const src = document.createElement("span");
+    src.className = "src" + (a.source === "model" ? " model" : "");
+    src.textContent = `${a.source}${a.conf != null ? " · " + a.conf.toFixed(2) : ""} · ${Math.round(a.x2 - a.x1)}×${Math.round(a.y2 - a.y1)}`;
+    const x = document.createElement("button");
+    x.className = "x"; x.textContent = "✕"; x.title = "Delete";
+    x.onclick = (e) => { e.stopPropagation(); deleteAnn(i); };
+    li.append(sw, s, src, x);
+    li.onclick = () => editor.select(i);
+    ul.appendChild(li);
+  });
+  ul.querySelector("li.sel")?.scrollIntoView({ block: "nearest" });
+}
+
+function deleteAnn(i) {
+  const d = S.doc;
+  if (!d || i < 0 || i >= d.anns.length) return;
+  d.anns.splice(i, 1);
+  editor.select(-1);
+  editor.setAnnotations(d.anns);
+  commit();
+}
+
+// ---------------------------------------------------------------- register
+function sourceSummary(anns) {
+  const s = [...new Set(anns.map((a) => a.source || "manual"))].sort();
+  return s.length ? s.join("+") : "empty";
+}
+
+async function register() {
+  const d = S.doc;
+  if (!d) return;
+  if (!d.anns.length && !confirm(`Register "${d.name}" with NO objects (negative example)?`)) return;
+  try {
+    const res = await api("/api/register", { json: {
+      name: d.name, params: d.params, annotations: d.anns,
+      source: sourceSummary(d.anns),
+      model: d.anns.some((a) => a.source === "model" || a.source === "edited") ? (S.model?.name || "") : "",
+    } });
+    d.dirty = false;
+    d.registered = true;
+    d.usedRegistered = false;
+    S.drafts.delete(d.name);
+    const f = S.files.find((f) => f.name === d.name);
+    if (f) f.registered = true;
+    let m = `Registered ${res.stem}: ${res.n_objects} object(s)`;
+    if (res.unknown_classes.length) m += ` — class id(s) ${res.unknown_classes.join(", ")} not in classes.json`;
+    msg(m, res.unknown_classes.length ? "err" : "ok");
+    $("out-path").textContent = S.out || "";
+    if ($("chk-advance").checked) {
+      const list = visibleFiles();
+      const i = list.findIndex((x) => x.name === d.name);
+      const next = list.slice(i + 1).find((x) => !x.registered) || list[i + 1];
+      if (next) { await openFile(next.name); return; }
+    }
+    refreshDocUI();
+  } catch (e) { fail(e); }
+}
+
+async function unregister() {
+  const d = S.doc;
+  if (!d?.registered || !confirm(`Remove the registered image and labels for "${d.name}"?`)) return;
+  try {
+    await api(`/api/register?${qs({ name: d.name })}`, { method: "DELETE" });
+    const f = S.files.find((f) => f.name === d.name);
+    if (f) f.registered = false;
+    S.drafts.delete(d.name);
+    S.doc = null;
+    await openFile(d.name);
+    msg("Unregistered " + d.name, "ok");
+  } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------- prediction
+async function scanModels(folder) {
+  const r = await api(`/api/models?${qs({ folder })}`);
+  $("m-folder").value = r.folder || "";
+  const sel = $("m-select");
+  sel.innerHTML = "";
+  if (!r.models.length) { sel.add(new Option(r.folder ? "No .pt files found" : "Set a models folder", "")); return; }
+  for (const m of r.models) sel.add(new Option(m.name, m.path));
+  const prev = localStorage.getItem("imobj.model");
+  if (prev && r.models.some((m) => m.path === prev)) sel.value = prev;
+  await selectModel();
+}
+
+async function selectModel() {
+  const sel = $("m-select");
+  const path = sel.value;
+  S.model = path ? { path, name: sel.selectedOptions[0].textContent } : null;
+  S.modelInfo = null;
+  $("m-info").textContent = ""; $("m-warn").classList.add("hidden");
+  if (!path) return;
+  try { localStorage.setItem("imobj.model", path); } catch { /* ignore */ }
+  $("m-info").textContent = "Loading model…";
+  try {
+    const info = await api(`/api/model_info?${qs({ path })}`);
+    S.modelInfo = info;
+    const names = Object.entries(info.names).map(([k, v]) => `${k}: ${v}`).join(", ");
+    $("m-info").textContent = `${info.task} · imgsz ${info.imgsz} · classes {${names}}`;
+    $("m-imgsz").placeholder = `model default (${info.imgsz})`;
+    const mm = info.class_mismatch || {};
+    if (await adoptModelClasses()) { /* classes.json created from the model */ }
+    else if (Object.keys(mm).length) {
+      const w = $("m-warn");
+      w.innerHTML = `Model classes differ from classes.json (${Object.entries(mm).map(([k, v]) => `${k}: ${esc(v)}`).join(", ")}). ` +
+        `<button class="link" id="m-adopt">use model classes</button>`;
+      w.classList.remove("hidden");
+      $("m-adopt").onclick = async () => {
+        if (!confirm("Replace classes.json with the model's class names?")) return;
+        await api(`/api/classes/from_model?${qs({ path })}`, { method: "POST" }).catch(fail);
+        await loadClasses(); w.classList.add("hidden");
+      };
+    }
+  } catch (e) { $("m-info").textContent = ""; fail(e); }
+}
+
+// In Prediction mode, a project without classes.json takes the model's class names.
+async function adoptModelClasses() {
+  if (S.mode !== "predict" || !S.folder || !S.model || !S.modelInfo || S.classes.exists) return false;
+  try {
+    await api(`/api/classes/from_model?${qs({ path: S.model.path })}`, { method: "POST" });
+    S.modelInfo.classes_file_exists = true;
+    $("m-warn").classList.add("hidden");
+    await loadClasses();
+    msg("classes.json created from the model's class names", "ok");
+    return true;
+  } catch (e) { fail(e); return false; }
+}
+
+let predicting = false;
+async function predict() {
+  const d = S.doc;
+  if (!d) return;
+  if (!S.model) { msg("Select a model first (Prediction panel)", "err"); return; }
+  if (predicting) return;
+  predicting = true;
+  $("m-run").disabled = true;
+  msg("Predicting…");
+  try {
+    const imgsz = parseInt($("m-imgsz").value, 10) || null;
+    const r = await api("/api/predict", { json: {
+      name: d.name, params: d.params, model: S.model.path,
+      conf: parseFloat($("m-conf").value), iou: parseFloat($("m-iou").value), imgsz,
+    } });
+    if (S.doc !== d) return;
+    const keep = d.anns.filter((a) => a.source === "manual");
+    d.anns.splice(0, d.anns.length, ...keep, ...r.annotations);
+    editor.select(-1);
+    editor.setAnnotations(d.anns);
+    commit();
+    msg(`${r.annotations.length} object(s) predicted` + (keep.length ? `, ${keep.length} manual kept` : ""), "ok");
+  } catch (e) { fail(e); } finally { predicting = false; $("m-run").disabled = false; }
+}
+
+let confTimer;
+function onThresholdChange() {
+  $("m-conf-v").textContent = parseFloat($("m-conf").value).toFixed(2);
+  $("m-iou-v").textContent = parseFloat($("m-iou").value).toFixed(2);
+  const d = S.doc;
+  // live re-predict only while the predictions are still unreviewed
+  if (S.mode !== "predict" || !d || !S.model) return;
+  if (!d.anns.some((a) => a.source === "model") || d.anns.some((a) => a.source === "edited")) return;
+  clearTimeout(confTimer);
+  confTimer = setTimeout(predict, 300);
+}
+
+async function setMode(mode) {
+  S.mode = mode;
+  document.querySelectorAll("#modes button").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+  $("predict-panel").classList.toggle("hidden", mode !== "predict");
+  try { localStorage.setItem("imobj.mode", mode); } catch { /* ignore */ }
+  if (mode !== "predict") return;
+  await adoptModelClasses();
+  const d = S.doc;
+  if (d && !d.dirty && !d.registered && $("m-auto").checked && S.model && !d.anns.length) await predict();
+}
+
+// ---------------------------------------------------------------- dialogs
+async function browse(path) {
+  try {
+    const r = await api(`/api/browse?${qs({ path })}`);
+    $("fb-path").value = r.path;
+    const ul = $("fb-list");
+    ul.innerHTML = "";
+    if (r.parent) { const li = document.createElement("li"); li.textContent = "⬑ .."; li.onclick = () => browse(r.parent); ul.appendChild(li); }
+    for (const dname of r.dirs) {
+      const li = document.createElement("li");
+      li.textContent = "📁 " + dname;
+      li.onclick = () => browse(r.path.replace(/[\\/]$/, "") + (r.path.includes("\\") ? "\\" : "/") + dname);
+      li.ondblclick = () => openFolder(r.path.replace(/[\\/]$/, "") + (r.path.includes("\\") ? "\\" : "/") + dname);
+      ul.appendChild(li);
+    }
+    $("fb-count").textContent = `${r.n_files} supported file(s) here`;
+    const dv = $("fb-drives");
+    dv.innerHTML = "";
+    for (const drv of r.drives) { const b = document.createElement("button"); b.textContent = drv; b.onclick = () => browse(drv); dv.appendChild(b); }
+  } catch (e) { fail(e); }
+}
+
+async function openFolder(path) {
+  if ([...S.drafts.values()].some((d) => d.dirty) || S.doc?.dirty) {
+    if (!confirm("Unsaved edits in this folder will be lost. Continue?")) return;
+  }
+  try {
+    const st = await api("/api/open", { json: { folder: path } });
+    $("dlg-folder").close();
+    S.drafts.clear(); S.doc = null;
+    applyState(st);
+    await loadClasses();
+    await loadFiles();
+    if (S.model) await selectModel();
+  } catch (e) { fail(e); }
+}
+
+function applyState(st) {
+  S.folder = st.folder; S.out = st.out;
+  $("folder-path").textContent = st.folder || "No folder open";
+  $("folder-path").title = st.folder || "";
+  $("out-path").textContent = st.out ? `→ ${st.out}` : "";
+  $("out-path").title = st.out || "";
+}
+
+function openClassesDialog() {
+  const body = $("cls-body");
+  body.innerHTML = "";
+  const addRow = (c) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><input type="number" min="0" value="${c.id}"></td>
+      <td><input type="text" value="${esc(c.name)}"></td>
+      <td><input type="color" value="${c.color}"></td>
+      <td><button class="link danger">remove</button></td>`;
+    tr.querySelector("button").onclick = () => tr.remove();
+    body.appendChild(tr);
+  };
+  S.classes.classes.forEach(addRow);
+  $("cls-add").onclick = () => {
+    const ids = [...body.querySelectorAll("tr")].map((tr) => parseInt(tr.querySelector("input").value, 10) || 0);
+    const id = ids.length ? Math.max(...ids) + 1 : 0;
+    const pal = ["#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6"];
+    addRow({ id, name: "", color: pal[id % pal.length] });
+  };
+  $("cls-err").textContent = "";
+  $("dlg-classes").showModal();
+}
+
+async function saveClasses() {
+  if (!S.folder) { $("cls-err").textContent = "Open a data folder first."; return; }
+  const classes = [...$("cls-body").querySelectorAll("tr")].map((tr) => {
+    const [id, name, color] = tr.querySelectorAll("input");
+    return { id: parseInt(id.value, 10), name: name.value.trim(), color: color.value };
+  });
+  try {
+    await api("/api/classes", { method: "PUT", json: { task: "detect", classes } });
+    $("dlg-classes").close();
+    await loadClasses();
+    msg("Classes saved", "ok");
+  } catch (e) { $("cls-err").textContent = e.message; }
+}
+
+// ---------------------------------------------------------------- keyboard
+window.addEventListener("keydown", (e) => {
+  if (document.querySelector("dialog[open]") || isTyping(e)) return;
+  const k = e.key, ctrl = e.ctrlKey || e.metaKey;
+  if (ctrl && k.toLowerCase() === "s") { e.preventDefault(); register(); return; }
+  if (ctrl && k.toLowerCase() === "z") { e.preventDefault(); undo(e.shiftKey); return; }
+  if (ctrl && k.toLowerCase() === "y") { e.preventDefault(); undo(true); return; }
+  if (ctrl) return;
+  if (k === "Enter") { e.preventDefault(); register(); }
+  else if (/^[1-9]$/.test(k)) { const c = S.classes.classes[parseInt(k, 10) - 1]; if (c) setClass(c.id); }
+  else if (k === "Delete" || k === "Backspace") { e.preventDefault(); deleteAnn(editor.sel); }
+  else if (k === "Escape") editor.select(-1);
+  else if (k === "a" || k === "A" || k === "PageUp") step(-1);
+  else if (k === "d" || k === "D" || k === "PageDown") step(1);
+  else if (k === "f" || k === "F") editor.fit();
+  else if (k === "h" || k === "H") { $("chk-show").checked = !$("chk-show").checked; editor.showBoxes = $("chk-show").checked; editor.draw(); }
+  else if (k === "p" || k === "P") { if (S.mode !== "predict") setMode("predict"); predict(); }
+  else if (k === "Tab") {
+    e.preventDefault();
+    const n = S.doc?.anns.length || 0;
+    if (n) editor.select(((editor.sel + (e.shiftKey ? -1 : 1)) % n + n) % n);
+  } else if (k.startsWith("Arrow")) {
+    e.preventDefault();
+    if (editor.sel >= 0) {
+      const s = e.shiftKey ? 10 : 1;
+      editor.nudge(k === "ArrowLeft" ? -s : k === "ArrowRight" ? s : 0, k === "ArrowUp" ? -s : k === "ArrowDown" ? s : 0);
+    } else step(k === "ArrowLeft" || k === "ArrowUp" ? -1 : 1);
+  }
+});
+
+// ---------------------------------------------------------------- wiring
+function wire() {
+  document.querySelectorAll("#modes button").forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
+  $("btn-open").onclick = () => { browse(S.folder || ""); $("dlg-folder").showModal(); };
+  $("fb-go").onclick = () => browse($("fb-path").value);
+  $("fb-path").onkeydown = (e) => { if (e.key === "Enter") browse($("fb-path").value); };
+  $("fb-cancel").onclick = () => $("dlg-folder").close();
+  $("fb-open").onclick = () => openFolder($("fb-path").value);
+  $("btn-classes").onclick = openClassesDialog;
+  $("cls-cancel").onclick = () => $("dlg-classes").close();
+  $("cls-save").onclick = saveClasses;
+  $("btn-dataset").onclick = () => { $("ds-msg").textContent = ""; $("dlg-dataset").showModal(); };
+  $("ds-close").onclick = () => $("dlg-dataset").close();
+  $("ds-build").onclick = async () => {
+    try {
+      const r = await api("/api/data_yaml", { json: { val_fraction: parseFloat($("ds-val").value) || 0, seed: parseInt($("ds-seed").value, 10) || 0 } });
+      $("ds-msg").textContent = `Wrote ${r.path}: ${r.n_train} train / ${r.n_val} val`;
+    } catch (e) { $("ds-msg").textContent = e.message; }
+  };
+  $("btn-help").onclick = () => $("dlg-help").showModal();
+  $("help-close").onclick = () => $("dlg-help").close();
+
+  $("file-filter").oninput = renderFiles;
+  $("file-show").onchange = renderFiles;
+  $("btn-prev").onclick = () => step(-1);
+  $("btn-next").onclick = () => step(1);
+  $("btn-fit").onclick = () => editor.fit();
+  $("chk-show").onchange = (e) => { editor.showBoxes = e.target.checked; editor.draw(); };
+  $("chk-labels").onchange = (e) => { editor.showTags = e.target.checked; editor.draw(); };
+  for (const id of ["p-channel", "p-flatten", "p-cmap", "p-lo", "p-hi"]) $(id).onchange = onParamChange;
+  $("btn-clear").onclick = () => {
+    const d = S.doc;
+    if (!d?.anns.length || !confirm(`Remove all ${d.anns.length} boxes from this image?`)) return;
+    d.anns.splice(0); editor.select(-1); editor.setAnnotations(d.anns); commit();
+  };
+  $("btn-register").onclick = register;
+  $("btn-unregister").onclick = unregister;
+
+  $("m-scan").onclick = () => scanModels($("m-folder").value.trim()).catch(fail);
+  $("m-folder").onkeydown = (e) => { if (e.key === "Enter") $("m-scan").click(); };
+  $("m-select").onchange = selectModel;
+  $("m-conf").oninput = onThresholdChange;
+  $("m-iou").oninput = onThresholdChange;
+  $("m-run").onclick = predict;
+
+  window.addEventListener("beforeunload", (e) => {
+    if (S.doc?.dirty || S.drafts.size) { e.preventDefault(); e.returnValue = ""; }
+  });
+}
+
+async function init() {
+  wire();
+  try {
+    const st = await api("/api/state");
+    for (const m of st.flatten_modes) $("p-flatten").add(new Option(m, m));
+    for (const c of st.colormaps) $("p-cmap").add(new Option(c, c));
+    applyState(st);
+    await loadClasses();
+    let mode = "label";
+    try { mode = localStorage.getItem("imobj.mode") || "label"; } catch { /* ignore */ }
+    S.mode = mode;
+    if (st.folder) await loadFiles();
+    else { $("btn-open").click(); }
+    if (st.settings.models_folder) await scanModels(st.settings.models_folder).catch(fail);
+    await setMode(mode);
+  } catch (e) { fail(e); }
+}
+
+init();
