@@ -164,3 +164,87 @@ def test_dataset_sources_and_grouped_split(tmp_path):
     assert "val: val.txt" in (out / "data.yaml").read_text()
     with pytest.raises(ValueError):
         p.write_data_yaml(source="nope")
+
+
+@pytest.mark.parametrize("t", ["rot90", "rot180", "rot270"])
+def test_rotation_moves_boxes_with_the_image(t):
+    from imobj_labeler import augment
+
+    img = np.zeros((40, 60), np.uint8)
+    img[5:15, 30:50] = 255  # bright block, box in pixels x 30..50, y 5..15
+    box = (0, 40 / 60, 10 / 40, 20 / 60, 10 / 40)
+    out, rows = augment.apply(img, [box], t, np.random.default_rng(0))
+    _, cx, cy, w, h = rows[0]
+    H, W = out.shape
+    ys, xs = np.nonzero(out)
+    assert cx == pytest.approx((xs.min() + xs.max() + 1) / 2 / W)
+    assert cy == pytest.approx((ys.min() + ys.max() + 1) / 2 / H)
+    assert w == pytest.approx((xs.max() - xs.min() + 1) / W)
+    assert h == pytest.approx((ys.max() - ys.min() + 1) / H)
+
+
+def test_augmented_copies_follow_their_source(tmp_path):
+    from PIL import Image
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "labels").mkdir()
+    for i in range(10):
+        Image.fromarray(np.full((40, 60), 100, np.uint8)).save(tmp_path / "images" / f"e{i}.png")
+        (tmp_path / "labels" / f"e{i}.txt").write_text("0\t0.5\t0.5\t0.2\t0.2\n")
+    p = Project(tmp_path / "images")
+    out = p.out
+    lines = lambda f: (out / f).read_text().split()
+
+    p.write_data_yaml(0.3, seed=2, source="existing")
+    r = p.augment(["rot90", "noise"], noise_sigma=5, train=True, val=True)
+    assert r["n_aug_written"] == 20 and (r["n_train_aug"], r["n_val_aug"]) == (14, 6)
+    assert (out / "aug" / "images" / "e0__rot90.png").is_file()
+    assert (out / "aug" / "labels" / "e0__rot90.txt").is_file()
+    val_src = {Path(x).stem for x in lines("val.txt") if "/aug/" not in x}
+    val_aug = {Path(x).stem.split("__")[0] for x in lines("val.txt") if "/aug/" in x}
+    assert val_aug == val_src and lines("val_aug.txt") == [x for x in lines("val.txt") if "/aug/" in x]
+    assert "test: val_aug.txt" in (out / "data.yaml").read_text()
+
+    # re-split with another seed: copies move with their source, never leak
+    p.write_data_yaml(0.3, seed=5)
+    val_src = {Path(x).stem for x in lines("val.txt") if "/aug/" not in x}
+    train_aug = {Path(x).stem.split("__")[0] for x in lines("train.txt") if "/aug/" in x}
+    assert val_src and not (val_src & train_aug)
+
+    # editing a source label makes its copies stale (skipped) until augmentation is re-run
+    import os, time
+    lab = tmp_path / "labels" / "e1.txt"
+    lab.write_text("0 0.4 0.4 0.2 0.2\n")
+    os.utime(lab, ns=(time.time_ns() + 10**9,) * 2)
+    assert p.write_data_yaml()["n_aug_stale"] == 2
+
+    p.remove_augmentation()
+    assert not (out / "aug").exists() and not any("/aug/" in x for x in lines("train.txt"))
+    assert "test:" not in (out / "data.yaml").read_text()
+
+
+def test_rotated_copies_get_noise_with_probability(tmp_path):
+    from PIL import Image
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "labels").mkdir()
+    for i in range(20):
+        Image.fromarray(np.full((40, 60), 100, np.uint8)).save(tmp_path / "images" / f"e{i}.png")
+        (tmp_path / "labels" / f"e{i}.txt").write_text("0 0.5 0.5 0.2 0.2\n")
+    p = Project(tmp_path / "images")
+    p.write_data_yaml(0.0, seed=3, source="existing")
+
+    def names(prob):
+        p.augment(["rot90", "rot180"], noise_sigma=8, rot_noise_p=prob)
+        return sorted(f.name for f in (p.aug_dir / "images").iterdir())
+
+    plain = names(0.0)
+    assert len(plain) == 40 and not any("noise" in n for n in plain)
+    assert all("_noise" in n for n in names(1.0))
+    half = names(0.5)
+    noisy = [n for n in half if n.endswith("_noise.png")]
+    assert len(half) == 40 and 8 <= len(noisy) <= 32
+    assert names(0.5) == half  # same seed, same draw
+    img = np.asarray(Image.open(p.aug_dir / "images" / noisy[0]))
+    assert img.shape == (60, 40) and img.std() > 3  # rotated and noisy
+    assert p.split_settings()["aug"]["rot_noise_p"] == 0.5

@@ -70,3 +70,18 @@ The Dataset dialog picks which images go into `data.yaml`: **combined** (the def
 - The settings (source, validation fraction, seed) are saved in `obj_det_labels/split.json` and re-applied after every registration, so a registration no longer resets the split.
 - **Still open from entry 1:** assignments aren't stored per file. Adding a file and re-applying the split reshuffles with the same seed, so some files can move between train and val. Fixing that needs stored per-file assignments.
 - Ultralytics writes its `labels.cache` next to the first label folder it sees, so train and val may share one cache file and rebuild it on each run. This only costs time, not correctness.
+
+---
+
+## 4. Offline augmentation: exact boxes only, copies follow their source
+
+**Status:** implemented (as of 2026-11-07)
+
+The Dataset dialog can write saved augmented copies, created only when the user presses the button and never on registration.
+
+- **Transforms:** 90° rotations, Gaussian noise and blur. Arbitrary-angle rotation is left out on purpose: YOLO boxes are axis-aligned, so after a rotation the box enclosing the rotated corners is too large (about 40% at 45°). Flips, zoom, crops, mosaic and brightness are better done on the fly by ultralytics, which gives new randomness every epoch.
+- **Folders:** `obj_det_labels/aug/images` and `aug/labels`, not `aug_images/` and `aug_labels/`. Ultralytics finds a label by replacing the last `/images/` in the image path with `/labels/`. With `aug_images/` it would replace an earlier `/images/` in the path and look in the wrong place.
+- **No leakage:** `aug/manifest.json` records each copy's source image and source-file group. When the lists are written, each copy goes to the set its source is currently in. A re-split therefore can't put a copy of a val image into train.
+- **Staleness:** the manifest stores the source image and label modification times. Copies whose source changed, or left the dataset, are skipped and counted until augmentation is run again.
+- **Val copies:** listed in `val.txt` together with the clean val images (what the user asked for), and on their own in `val_aug.txt` as `test:`, so the noisy-image score can be read separately with `split=test`. Note that `best.pt` is then chosen on clean and augmented val together.
+- The noise RNG is seeded with the split seed, so the same settings give the same copies.

@@ -40,7 +40,9 @@ Registration writes everything into `obj_det_labels/` inside the data folder:
   classes.json            class definitions
   data.yaml               ultralytics dataset file (refreshed on each registration)
   train.txt / val.txt     image lists used by data.yaml (nothing is copied)
-  split.json              dataset source + split settings, re-applied on each registration
+  val_aug.txt             augmented val copies only (data.yaml "test:"), if any
+  split.json              dataset source + split + augmentation settings, re-applied on each registration
+  aug/images, aug/labels  augmented copies + manifest.json (only when you create them)
   register_log.csv        provenance: source (manual/model/edited), model, render settings
 ```
 
@@ -53,6 +55,16 @@ The **Dataset…** dialog chooses which images go into `data.yaml` and writes a 
 - **Existing**: only the data folder's own images with `../labels` (the data folder must be named `images`).
 
 The split is per source file, so all registered versions of one file land in the same set. Nothing is copied: `train.txt` / `val.txt` list the image paths, and YOLO finds each label by swapping `/images/` for `/labels/` in the path. A validation fraction of 0 uses every image for both train and val.
+
+### Augmentation
+
+The Dataset dialog's **Create augmented copies** button writes saved copies of the images in the current split: one copy per ticked transform (rotate 90° / 180° / 270°, Gaussian noise, blur), for train, val or both. They go to `obj_det_labels/aug/images` + `aug/labels` and are added to `train.txt` / `val.txt`. It runs only when you press it, not on every registration, and pressing it again replaces the previous copies. With **Rotate + noise, p** ticked, each rotated copy also gets Gaussian noise (same σ) with probability p; such copies are named `<stem>__rot90_noise.png`. The draw uses the split seed, so the same settings give the same copies.
+
+- Boxes stay exact: only 90° rotations are offered, since an arbitrary rotation makes axis-aligned boxes too large. Leave flips, zoom, crops, mosaic and brightness to YOLO during training (`fliplr`, `flipud`, `scale`, `translate`, `mosaic`, `hsv_v`).
+- Each copy follows its source image into train or val, so re-splitting never leaks a val copy into train.
+- Copies whose source labels changed since they were made are left out of the lists (the dialog shows how many) until you create them again.
+- When val copies exist, `data.yaml` gets `test: val_aug.txt`. `yolo val data=.../data.yaml split=test` then scores the model on the augmented (e.g. noisy) val images alone, while `val.txt` holds the clean and augmented val images together.
+- **remove augmented copies** deletes `aug/` and takes the copies out of the lists.
 
 ## Classes (`classes.json`)
 

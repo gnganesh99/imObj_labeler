@@ -7,7 +7,8 @@ Layout written on *Register*::
         labels/<stem>.txt       YOLO detection labels
         classes.json            class definitions
         data.yaml               ultralytics dataset file (train.txt / val.txt image lists)
-        split.json              dataset source + split settings used for data.yaml
+        split.json              dataset source + split (+ augmentation) settings for data.yaml
+        aug/images, aug/labels  augmented copies (Dataset dialog -> Create augmented copies)
         register_log.csv        one row per registration (provenance)
 """
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import csv
 import json
 import random
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +24,7 @@ import numpy as np
 from PIL import Image
 
 from . import annotations as ann
+from . import augment
 from . import classes as cls_cfg
 from . import reader
 
@@ -263,19 +266,9 @@ class Project:
         except ValueError:
             return img.as_posix()  # existing images live outside obj_det_labels
 
-    def write_data_yaml(self, val_fraction: float | None = None, seed: int | None = None,
-                        source: str | None = None) -> dict:
-        """Write train.txt / val.txt / data.yaml. Called without arguments (e.g. after a
-        registration) it re-applies the last saved split settings instead of resetting them."""
-        cfg = self.split_settings()
-        given = {k: v for k, v in (("val_fraction", val_fraction), ("seed", seed),
-                                   ("source", source)) if v is not None}
-        cfg.update(given)
+    def _split(self, cfg: dict):
+        """Groups for the configured source, and which group keys go to validation."""
         groups, stats = self.dataset_groups(cfg["source"])  # also validates the source
-        self.out.mkdir(parents=True, exist_ok=True)
-        if given:
-            self.split_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-
         keys = sorted(groups, key=reader.natural_key)
         frac = float(cfg["val_fraction"])
         split = frac > 0 and len(keys) >= 2
@@ -285,27 +278,167 @@ class Project:
             random.Random(int(cfg["seed"])).shuffle(shuffled)
             n_val = min(len(keys) - 1, max(1, int(round(len(keys) * frac))))
             val_keys = set(shuffled[:n_val])
+        return groups, stats, keys, val_keys, split
+
+    def write_data_yaml(self, val_fraction: float | None = None, seed: int | None = None,
+                        source: str | None = None) -> dict:
+        """Write train.txt / val.txt / data.yaml. Called without arguments (e.g. after a
+        registration) it re-applies the last saved split settings instead of resetting them.
+        Augmented copies (see ``augment``) are added to the set their source image is in."""
+        cfg = self.split_settings()
+        given = {k: v for k, v in (("val_fraction", val_fraction), ("seed", seed),
+                                   ("source", source)) if v is not None}
+        cfg.update(given)
+        groups, stats, keys, val_keys, split = self._split(cfg)
+        self.out.mkdir(parents=True, exist_ok=True)
+        if given:
+            self.split_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
         train = [img for k in keys if k not in val_keys for img in groups[k]]
         val = [img for k in keys if k in val_keys for img in groups[k]]
+        train_aug, val_aug, n_stale = self._aug_entries(cfg, groups, val_keys)
 
         def write_list(fname: str, imgs: list[Path]):
             (self.out / fname).write_text("".join(self._list_entry(p) + "\n" for p in imgs),
                                           encoding="utf-8")
 
-        write_list("train.txt", train)
+        def drop(fname: str):
+            if (self.out / fname).is_file():
+                (self.out / fname).unlink()
+
+        write_list("train.txt", train + train_aug)
         if split:
-            write_list("val.txt", val)
-        elif (self.out / "val.txt").is_file():
-            (self.out / "val.txt").unlink()
+            write_list("val.txt", val + val_aug)
+        else:
+            drop("val.txt")
+        if val_aug:
+            write_list("val_aug.txt", val_aug)
+        else:
+            drop("val_aug.txt")
 
         names = cls_cfg.names(self.classes())
+        frac = float(cfg["val_fraction"])
         lines = [f"# source: {cfg['source']}, val_fraction: {frac}, seed: {cfg['seed']}"
                  " (written by imobj_labeler)",
                  f"path: {json.dumps(self.out.as_posix())}",
-                 "train: train.txt", f"val: {'val.txt' if split else 'train.txt'}", "names:"]
+                 "train: train.txt", f"val: {'val.txt' if split else 'train.txt'}"]
+        if val_aug:  # `yolo val data=data.yaml split=test` scores the augmented val copies alone
+            lines.append("test: val_aug.txt")
+        lines.append("names:")
         lines += [f"  {i}: {json.dumps(n)}" for i, n in sorted(names.items())]
         self.yaml_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        n_val = len(val) + len(val_aug) if split else len(train) + len(train_aug)
         return {"path": str(self.yaml_path), "source": cfg["source"], "val_fraction": frac,
                 "seed": int(cfg["seed"]), "split": split,
-                "n_train": len(train), "n_val": len(val) if split else len(train),
+                "n_train": len(train) + len(train_aug), "n_val": n_val,
+                "n_train_aug": len(train_aug), "n_val_aug": len(val_aug), "n_aug_stale": n_stale,
                 "groups_train": len(keys) - len(val_keys), "groups_val": len(val_keys), **stats}
+
+    # ------------------------------------------------------------ augmentation
+    # Saved copies live in obj_det_labels/aug/images + aug/labels (YOLO finds a label by
+    # swapping the last /images/ for /labels/, so the two folders must be named that way).
+    # aug/manifest.json records each copy's source image, so a copy always follows its
+    # source into train or val: re-splitting can never leak an augmented val image into train.
+    @property
+    def aug_dir(self) -> Path:
+        return self.out / "aug"
+
+    def _manifest(self) -> list[dict]:
+        try:
+            return json.loads((self.aug_dir / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+
+    @staticmethod
+    def _mtimes(img: Path) -> list[int]:
+        return [img.stat().st_mtime_ns, augment.label_path_for(img).stat().st_mtime_ns]
+
+    def _aug_entries(self, cfg: dict, groups: dict, val_keys: set[str]):
+        """Augmented copies to list, per set. Copies whose source changed since they were made
+        (labels edited, file re-registered) or left the dataset are skipped and counted stale."""
+        aug = cfg.get("aug") or {}
+        train, val, stale = [], [], 0
+        for e in self._manifest():
+            img = self.aug_dir / "images" / e["image"]
+            src = Path(e["source"])
+            if not img.is_file():
+                continue
+            try:
+                current = src in groups.get(e["group"], []) and self._mtimes(src) == e["src_mtime"]
+            except OSError:
+                current = False
+            if not current:
+                stale += 1
+                continue
+            which = "val" if e["group"] in val_keys else "train"
+            if aug.get(which):
+                (val if which == "val" else train).append(img)
+        return train, val, stale
+
+    def augment(self, transforms: list[str], noise_sigma: float = 10.0, blur_radius: float = 1.0,
+                train: bool = True, val: bool = True, rot_noise_p: float = 0.0) -> dict:
+        """Write augmented copies of the images in the current split (one copy per transform)
+        and list them in train.txt / val.txt. Replaces any earlier augmentation.
+
+        ``rot_noise_p``: each rotated copy also gets Gaussian noise (``noise_sigma``) with this
+        probability. The draw comes from the split seed, so the same settings give the same copies."""
+        bad = sorted(set(transforms) - set(augment.TRANSFORMS))
+        if bad or not transforms:
+            raise ValueError(f"choose transforms from {augment.TRANSFORMS}")
+        if not (train or val):
+            raise ValueError("choose train, val or both")
+        if not 0.0 <= rot_noise_p <= 1.0:
+            raise ValueError("rot_noise_p must be between 0 and 1")
+        cfg = self.split_settings()
+        groups, _, keys, val_keys, _ = self._split(cfg)
+        self.remove_augmentation(write=False)
+        (self.aug_dir / "images").mkdir(parents=True, exist_ok=True)
+        (self.aug_dir / "labels").mkdir(parents=True, exist_ok=True)
+        rng = np.random.default_rng(int(cfg["seed"]))
+        manifest, used = [], set()
+        for key in keys:
+            if not (val if key in val_keys else train):
+                continue
+            for src in groups[key]:
+                lab = augment.label_path_for(src)
+                if not lab.is_file():
+                    continue
+                arr, rows = augment.load_image(src), augment.read_boxes(lab)
+                for t in transforms:
+                    out_arr, out_rows = augment.apply(arr, rows, t, rng, noise_sigma, blur_radius)
+                    tag = t
+                    if t.startswith("rot") and rot_noise_p > 0 and rng.random() < rot_noise_p:
+                        out_arr, out_rows = augment.apply(out_arr, out_rows, "noise", rng,
+                                                          noise_sigma, blur_radius)
+                        tag = f"{t}_noise"
+                    stem, i = f"{src.stem}__{tag}", 1
+                    while stem in used:  # same stem from two places (existing + registered)
+                        stem, i = f"{src.stem}_{i}__{tag}", i + 1
+                    used.add(stem)
+                    Image.fromarray(out_arr).save(self.aug_dir / "images" / f"{stem}.png")
+                    augment.write_boxes(self.aug_dir / "labels" / f"{stem}.txt", out_rows)
+                    manifest.append({"image": f"{stem}.png", "source": str(src), "group": key,
+                                     "transform": tag, "src_mtime": self._mtimes(src)})
+        (self.aug_dir / "manifest.json").write_text(json.dumps(manifest, indent=1),
+                                                    encoding="utf-8")
+        cfg["aug"] = {"transforms": list(transforms), "noise_sigma": noise_sigma,
+                      "blur_radius": blur_radius, "train": train, "val": val,
+                      "rot_noise_p": rot_noise_p}
+        self.split_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        return {**self.write_data_yaml(), "n_aug_written": len(manifest)}
+
+    def remove_augmentation(self, write: bool = True) -> dict | None:
+        """Delete aug/ and drop the copies from the image lists."""
+        if self.aug_dir.is_dir():
+            shutil.rmtree(self.aug_dir)
+        cfg = self.split_settings()
+        if cfg.pop("aug", None) is not None and self.split_path.is_file():
+            self.split_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        return self.write_data_yaml() if write else None
+
+    def aug_summary(self) -> dict:
+        cfg = self.split_settings()
+        groups, _, _, val_keys, _ = self._split(cfg)
+        train, val, stale = self._aug_entries(cfg, groups, val_keys)
+        return {"settings": cfg.get("aug"), "n_train": len(train), "n_val": len(val),
+                "n_stale": stale}

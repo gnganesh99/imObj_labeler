@@ -281,7 +281,7 @@ def dataset_summary():
         groups, stats = p.dataset_groups(src)
         counts[src] = {"files": len(groups), "images": sum(map(len, groups.values())),
                        "overridden": stats["n_overridden"]}
-    return {"settings": p.split_settings(), "counts": counts,
+    return {"settings": p.split_settings(), "counts": counts, "aug": p.aug_summary(),
             "has_existing": p.sibling_labels_dir() is not None,
             "yaml_exists": p.yaml_path.is_file(), "out": str(p.out)}
 
@@ -292,6 +292,32 @@ def data_yaml(req: YamlReq):
         return proj().write_data_yaml(req.val_fraction, req.seed, req.source)
     except ValueError as e:
         _fail(e)
+
+
+class AugReq(BaseModel):
+    split: YamlReq  # the split to augment (written first, so copies match what the dialog shows)
+    transforms: list[str]
+    noise_sigma: float = Field(10.0, gt=0, le=128)
+    blur_radius: float = Field(1.0, gt=0, le=20)
+    train: bool = True
+    val: bool = True
+    rot_noise_p: float = Field(0.0, ge=0.0, le=1.0)  # chance a rotated copy also gets noise
+
+
+@app.post("/api/augment")
+def run_augment(req: AugReq):
+    p = proj()
+    try:
+        p.write_data_yaml(req.split.val_fraction, req.split.seed, req.split.source)
+        return p.augment(req.transforms, req.noise_sigma, req.blur_radius, req.train, req.val,
+                         req.rot_noise_p)
+    except ValueError as e:
+        _fail(e)
+
+
+@app.delete("/api/augment")
+def remove_augment():
+    return proj().remove_augmentation()
 
 
 # ------------------------------------------------------------------ prediction

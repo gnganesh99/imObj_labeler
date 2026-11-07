@@ -111,6 +111,9 @@ section.register .primary { padding: 8px; font-size: 14px; }
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 16px; width: min(560px, 92vw); }
 dialog::backdrop { background: var(--backdrop); }
 dialog h3 { margin-top: 0; }
+.ds-sub { margin: 14px 0 4px; padding-top: 10px; border-top: 1px solid var(--line); }
+.aug-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 12px; margin: 6px 0; }
+.aug-grid input[type=number] { width: 52px; }
 dialog .row { margin-top: 8px; }
 dialog.picker { width: min(760px, 94vw); }
 .picker-body { display: grid; grid-template-columns: 170px 1fr; gap: 10px; height: 380px; }

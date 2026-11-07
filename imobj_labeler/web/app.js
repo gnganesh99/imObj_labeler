@@ -413,8 +413,63 @@ async function openDatasetDialog() {
     $("ds-seed").value = s.seed;
     $("ds-source").value = s.source;
     $("ds-source").querySelector('[value="existing"]').disabled = !dsSummary.has_existing;
+    const a = dsSummary.aug.settings;
+    if (a) {  // show the augmentation that was last created
+      document.querySelectorAll("#dlg-dataset [data-t]").forEach((c) => { c.checked = a.transforms.includes(c.dataset.t); });
+      $("aug-sigma").value = a.noise_sigma;
+      $("aug-radius").value = a.blur_radius;
+      $("aug-train").checked = a.train;
+      $("aug-val").checked = a.val;
+      $("aug-rotnoise").checked = (a.rot_noise_p || 0) > 0;
+      if (a.rot_noise_p > 0) $("aug-rotnoise-p").value = a.rot_noise_p;
+    }
     showDatasetCounts();
+    showAugStatus(dsSummary.aug);
   } catch (e) { dsSummary = null; $("ds-msg").textContent = e.message; }
+}
+
+function showAugStatus(s) {
+  const has = s && s.settings;
+  $("aug-remove").classList.toggle("hidden", !has);
+  if (!has) { $("aug-status").textContent = "No augmented copies yet."; return; }
+  let t = `Current copies: ${s.n_train} in train, ${s.n_val} in val.`;
+  if (s.n_stale) t += ` ${s.n_stale} skipped as out of date (labels edited or source removed): create again to refresh.`;
+  $("aug-status").textContent = t;
+}
+
+const splitReq = () => ({
+  source: $("ds-source").value,
+  val_fraction: parseFloat($("ds-val").value) || 0,
+  seed: parseInt($("ds-seed").value, 10) || 0,
+});
+
+async function runAugment() {
+  const transforms = [...document.querySelectorAll("#dlg-dataset [data-t]")].filter((c) => c.checked).map((c) => c.dataset.t);
+  if (!transforms.length) { $("ds-msg").textContent = "Tick at least one transform."; return; }
+  const btn = $("aug-run");
+  btn.disabled = true;
+  $("ds-msg").textContent = "Creating augmented copies…";
+  try {
+    const r = await api("/api/augment", { json: {
+      split: splitReq(), transforms,
+      noise_sigma: parseFloat($("aug-sigma").value) || 10,
+      blur_radius: parseFloat($("aug-radius").value) || 1,
+      train: $("aug-train").checked, val: $("aug-val").checked,
+      rot_noise_p: $("aug-rotnoise").checked ? Math.min(1, Math.max(0, parseFloat($("aug-rotnoise-p").value) || 0)) : 0 } });
+    $("ds-msg").textContent = `Wrote ${r.n_aug_written} augmented images. Lists now: ${r.n_train} train (${r.n_train_aug} augmented) / `
+      + `${r.n_val} val (${r.n_val_aug} augmented)` + (r.n_val_aug ? ". test: val_aug.txt scores the augmented val copies alone." : "");
+    showAugStatus({ settings: true, n_train: r.n_train_aug, n_val: r.n_val_aug, n_stale: r.n_aug_stale });
+  } catch (e) { $("ds-msg").textContent = e.message; }
+  btn.disabled = false;
+}
+
+async function removeAugment() {
+  if (!confirm("Delete obj_det_labels/aug (all augmented images and labels) and remove them from train.txt / val.txt?")) return;
+  try {
+    const r = await api("/api/augment", { method: "DELETE" });
+    $("ds-msg").textContent = `Removed augmented copies. Lists now: ${r.n_train} train / ${r.n_val} val`;
+    showAugStatus(null);
+  } catch (e) { $("ds-msg").textContent = e.message; }
 }
 
 function showDatasetCounts() {
@@ -429,13 +484,12 @@ function showDatasetCounts() {
 
 async function writeDataset() {
   try {
-    const r = await api("/api/data_yaml", { json: {
-      source: $("ds-source").value,
-      val_fraction: parseFloat($("ds-val").value) || 0,
-      seed: parseInt($("ds-seed").value, 10) || 0 } });
+    const r = await api("/api/data_yaml", { json: splitReq() });
+    const aug = r.n_train_aug + r.n_val_aug ? ` (incl. ${r.n_train_aug} / ${r.n_val_aug} augmented)` : "";
     $("ds-msg").textContent = r.split
-      ? `Wrote ${r.path}: ${r.n_train} train / ${r.n_val} val images (${r.groups_train} / ${r.groups_val} source files)`
-      : `Wrote ${r.path}: all ${r.n_train} images used for both train and val`;
+      ? `Wrote ${r.path}: ${r.n_train} train / ${r.n_val} val images${aug} from ${r.groups_train} / ${r.groups_val} source files`
+      : `Wrote ${r.path}: all ${r.n_train} images${aug} used for both train and val`;
+    showAugStatus({ settings: r.n_train_aug + r.n_val_aug + r.n_aug_stale > 0, n_train: r.n_train_aug, n_val: r.n_val_aug, n_stale: r.n_aug_stale });
   } catch (e) { $("ds-msg").textContent = e.message; }
 }
 
@@ -785,6 +839,8 @@ function wire() {
   $("ds-close").onclick = () => $("dlg-dataset").close();
   $("ds-source").onchange = showDatasetCounts;
   $("ds-build").onclick = writeDataset;
+  $("aug-run").onclick = runAugment;
+  $("aug-remove").onclick = removeAugment;
   $("btn-help").onclick = () => $("dlg-help").showModal();
   $("help-close").onclick = () => $("dlg-help").close();
 

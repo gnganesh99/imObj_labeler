@@ -173,8 +173,35 @@
     <label>Seed</label><input id="ds-seed" type="number" value="0">
   </div>
   <div id="ds-counts" class="muted small"></div>
+  <div class="row"><span class="spacer"></span><button id="ds-build" class="primary">Write split</button></div>
+
+  <h4 class="ds-sub">Augmentation (saved copies)</h4>
+  <p class="muted small">One copy per ticked transform of every image in the chosen sets, written to
+    obj_det_labels/aug/images + aug/labels and added to train.txt / val.txt. Boxes stay exact.
+    Each copy follows its source image, so a re-split never puts a val copy into train.
+    Flips, zoom and brightness are better left to YOLO during training.</p>
+  <div class="aug-grid">
+    <label class="toggle"><input type="checkbox" id="aug-rot90" data-t="rot90" checked> Rotate 90°</label>
+    <label class="toggle"><input type="checkbox" id="aug-rot180" data-t="rot180" checked> Rotate 180°</label>
+    <label class="toggle"><input type="checkbox" id="aug-rot270" data-t="rot270" checked> Rotate 270°</label>
+    <label class="toggle"><input type="checkbox" id="aug-noise" data-t="noise" checked> Gaussian noise σ
+      <input id="aug-sigma" type="number" min="1" max="128" step="1" value="10" title="Standard deviation in gray levels (0–255)"></label>
+    <label class="toggle"><input type="checkbox" id="aug-blur" data-t="blur"> Blur radius
+      <input id="aug-radius" type="number" min="0.5" max="20" step="0.5" value="1" title="Gaussian blur radius in pixels"></label>
+    <label class="toggle" title="Each rotated copy also gets Gaussian noise (same σ) with this probability. The draw comes from the seed, so it is repeatable.">
+      <input type="checkbox" id="aug-rotnoise"> Rotate + noise, p
+      <input id="aug-rotnoise-p" type="number" min="0.05" max="1" step="0.05" value="0.5"></label>
+  </div>
+  <div class="row small">Apply to
+    <label class="toggle"><input type="checkbox" id="aug-train" checked> train</label>
+    <label class="toggle"><input type="checkbox" id="aug-val" checked> val</label>
+  </div>
+  <div id="aug-status" class="muted small"></div>
+  <div class="row"><button id="aug-remove" class="link danger hidden">remove augmented copies</button>
+    <span class="spacer"></span><button id="aug-run" class="primary">Create augmented copies</button></div>
+
   <div id="ds-msg" class="small"></div>
-  <div class="row"><span class="spacer"></span><button id="ds-close">Close</button><button id="ds-build" class="primary">Write split</button></div>
+  <div class="row"><span class="spacer"></span><button id="ds-close">Close</button></div>
 </dialog>
 
 <dialog id="dlg-help">
