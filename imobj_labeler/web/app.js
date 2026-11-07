@@ -397,6 +397,48 @@ async function removeRegistered(all) {
 const unregister = () => removeRegistered(false);
 const revertToExisting = () => removeRegistered(true);
 
+// ---------------------------------------------------------------- dataset (data.yaml)
+let dsSummary = null;
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+async function openDatasetDialog() {
+  $("ds-msg").textContent = "";
+  $("ds-counts").textContent = "";
+  $("dlg-dataset").showModal();
+  try {
+    dsSummary = await api("/api/dataset");
+    const s = dsSummary.settings;
+    // a never-split folder shows the 0.2 suggestion; a saved split shows what was used
+    if (dsSummary.yaml_exists && s.val_fraction > 0) $("ds-val").value = s.val_fraction;
+    $("ds-seed").value = s.seed;
+    $("ds-source").value = s.source;
+    $("ds-source").querySelector('[value="existing"]').disabled = !dsSummary.has_existing;
+    showDatasetCounts();
+  } catch (e) { dsSummary = null; $("ds-msg").textContent = e.message; }
+}
+
+function showDatasetCounts() {
+  if (!dsSummary) return;
+  const c = dsSummary.counts[$("ds-source").value];
+  let t = `${plural(c.files, "source file")}, ${plural(c.images, "image")}`;
+  if (c.overridden) t += ` · ${c.overridden} existing replaced by registered`;
+  if ($("ds-source").value === "existing" && !dsSummary.has_existing)
+    t = "No existing labels: the data folder must be an images/ folder with a ../labels folder.";
+  $("ds-counts").textContent = t;
+}
+
+async function writeDataset() {
+  try {
+    const r = await api("/api/data_yaml", { json: {
+      source: $("ds-source").value,
+      val_fraction: parseFloat($("ds-val").value) || 0,
+      seed: parseInt($("ds-seed").value, 10) || 0 } });
+    $("ds-msg").textContent = r.split
+      ? `Wrote ${r.path}: ${r.n_train} train / ${r.n_val} val images (${r.groups_train} / ${r.groups_val} source files)`
+      : `Wrote ${r.path}: all ${r.n_train} images used for both train and val`;
+  } catch (e) { $("ds-msg").textContent = e.message; }
+}
+
 // ---------------------------------------------------------------- prediction
 async function scanModels(folder) {
   const r = await api(`/api/models?${qs({ folder })}`);
@@ -508,7 +550,7 @@ async function setMode(mode) {
 async function chooseFolder({ title, initial = "", purpose = "data" }) {
   msg("Folder dialog open (if you can't see it, check the taskbar)");
   try {
-    const r = await api("/api/pick_folder", { json: { initial, title } });
+    const r = await api("/api/pick_folder", { json: { initial, title, purpose } });
     msg("");
     return r.path;
   } catch (e) {
@@ -739,14 +781,10 @@ function wire() {
   $("btn-classes").onclick = openClassesDialog;
   $("cls-cancel").onclick = () => $("dlg-classes").close();
   $("cls-save").onclick = saveClasses;
-  $("btn-dataset").onclick = () => { $("ds-msg").textContent = ""; $("dlg-dataset").showModal(); };
+  $("btn-dataset").onclick = openDatasetDialog;
   $("ds-close").onclick = () => $("dlg-dataset").close();
-  $("ds-build").onclick = async () => {
-    try {
-      const r = await api("/api/data_yaml", { json: { val_fraction: parseFloat($("ds-val").value) || 0, seed: parseInt($("ds-seed").value, 10) || 0 } });
-      $("ds-msg").textContent = `Wrote ${r.path}: ${r.n_train} train / ${r.n_val} val`;
-    } catch (e) { $("ds-msg").textContent = e.message; }
-  };
+  $("ds-source").onchange = showDatasetCounts;
+  $("ds-build").onclick = writeDataset;
   $("btn-help").onclick = () => $("dlg-help").showModal();
   $("help-close").onclick = () => $("dlg-help").close();
 

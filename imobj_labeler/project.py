@@ -6,7 +6,8 @@ Layout written on *Register*::
         images/<stem>.png       rendered image the boxes were drawn on
         labels/<stem>.txt       YOLO detection labels
         classes.json            class definitions
-        data.yaml               ultralytics dataset file
+        data.yaml               ultralytics dataset file (train.txt / val.txt image lists)
+        split.json              dataset source + split settings used for data.yaml
         register_log.csv        one row per registration (provenance)
 """
 from __future__ import annotations
@@ -27,6 +28,9 @@ from . import reader
 OUT_DIR = {"detect": "obj_det_labels"}
 LOG_FIELDS = ["time", "file", "stem", "n_objects", "source", "model", "channel",
               "flatten", "cmap", "lo", "hi", "width", "height"]
+DATASET_SOURCES = ("combined", "registered", "existing")
+SPLIT_DEFAULT = {"source": "combined", "val_fraction": 0.0, "seed": 0}
+YOLO_IMAGE_EXT = {".bmp", ".dng", ".jpeg", ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp"}
 
 
 class Project:
@@ -41,15 +45,18 @@ class Project:
         self.classes_path = self.out / "classes.json"
         self.log_path = self.out / "register_log.csv"
         self.yaml_path = self.out / "data.yaml"
+        self.split_path = self.out / "split.json"  # last split settings, re-applied on register
 
     # ------------------------------------------------------------ files
     def files(self) -> list[str]:
         return reader.list_files(self.data)
 
-    def stem_for(self, name: str) -> str:
-        """Label stem; files sharing a stem (a.sxm, a.png) get the extension appended."""
+    def stem_for(self, name: str, files: list[str] | None = None) -> str:
+        """Label stem; files sharing a stem (a.sxm, a.png) get the extension appended.
+        Pass ``files`` when calling in a loop: listing the folder is slow."""
         p = Path(name)
-        clash = sum(1 for f in self.files() if Path(f).stem == p.stem) > 1
+        files = self.files() if files is None else files
+        clash = sum(1 for f in files if Path(f).stem == p.stem) > 1
         return f"{p.stem}_{p.suffix.lstrip('.').lower()}" if clash else p.stem
 
     def path_of(self, name: str) -> Path:
@@ -69,11 +76,12 @@ class Project:
     def _exists(self, stem: str) -> bool:
         return (self.labels / f"{stem}.txt").is_file()
 
-    def versions(self, name: str, rows: list[dict] | None = None) -> list[str]:
+    def versions(self, name: str, rows: list[dict] | None = None,
+                 files: list[str] | None = None) -> list[str]:
         """Saved stems of ``name`` that still exist, oldest registration first."""
         rows = self._log_rows() if rows is None else rows
         out: list[str] = []
-        base = self.stem_for(name)
+        base = self.stem_for(name, files)
         for r in rows:
             s = r.get("stem")
             if r.get("file") == name and s:
@@ -101,8 +109,8 @@ class Project:
         return bool(self.versions(name))
 
     def status(self) -> dict[str, bool]:
-        rows = self._log_rows()
-        return {f: bool(self.versions(f, rows)) for f in self.files()}
+        rows, files = self._log_rows(), self.files()
+        return {f: bool(self.versions(f, rows, files)) for f in files}
 
     def sibling_labels_dir(self) -> Path | None:
         """If the data folder is a YOLO ``images/`` folder, its ``labels/`` sibling."""
@@ -199,28 +207,105 @@ class Project:
         return removed
 
     # ------------------------------------------------------------ data.yaml
-    def write_data_yaml(self, val_fraction: float = 0.0, seed: int = 0) -> dict:
-        names = cls_cfg.names(self.classes())
-        imgs = sorted(self.images.glob("*.png")) if self.images.is_dir() else []
-        imgs = [p for p in imgs if (self.labels / f"{p.stem}.txt").is_file()]
-        lines = [f"path: {json.dumps(self.out.as_posix())}"]
-        n_train = n_val = len(imgs)
-        if val_fraction > 0 and len(imgs) >= 2:
-            rng = random.Random(seed)
-            shuffled = imgs[:]
-            rng.shuffle(shuffled)
-            n_val = max(1, int(round(len(imgs) * val_fraction)))
-            val, train = shuffled[:n_val], shuffled[n_val:]
-            n_train = len(train)
-            (self.out / "train.txt").write_text(
-                "".join(f"./images/{p.name}\n" for p in sorted(train)), encoding="utf-8")
-            (self.out / "val.txt").write_text(
-                "".join(f"./images/{p.name}\n" for p in sorted(val)), encoding="utf-8")
-            lines += ["train: train.txt", "val: val.txt"]
+    # Training images come from two places:
+    #   registered: obj_det_labels/images + labels (written by this app)
+    #   existing:   the data folder itself, when it is a YOLO images/ folder with ../labels
+    # "combined" uses both; a file that is registered replaces its existing image + labels.
+    # The split is done per source file, so all registered versions of one file stay together.
+    def split_settings(self) -> dict:
+        cfg = dict(SPLIT_DEFAULT)
+        try:
+            cfg.update(json.loads(self.split_path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+        return cfg
+
+    def dataset_groups(self, source: str = "combined") -> tuple[dict[str, list[Path]], dict]:
+        """Images for training, grouped by source file, plus counts per origin."""
+        if source not in DATASET_SOURCES:
+            raise ValueError(f"source must be one of {DATASET_SOURCES}")
+        files, rows = self.files(), self._log_rows()
+        reg: dict[str, list[Path]] = {}
+        claimed: set[str] = set()
+        for name in files:
+            stems = self.versions(name, rows, files)
+            claimed.update(stems)
+            imgs = [self.images / f"{s}.png" for s in stems]
+            imgs = [p for p in imgs if p.is_file()]
+            if imgs:
+                reg[name] = imgs
+        if self.labels.is_dir():  # registered images whose source file is gone: own group each
+            for lab in sorted(self.labels.glob("*.txt")):
+                img = self.images / f"{lab.stem}.png"
+                if lab.stem not in claimed and img.is_file():
+                    reg[f"[{lab.stem}]"] = [img]
+        existing: dict[str, list[Path]] = {}
+        sib = self.sibling_labels_dir()
+        if sib is not None:
+            for name in files:
+                p = self.data / name
+                if p.suffix.lower() in YOLO_IMAGE_EXT and (sib / f"{p.stem}.txt").is_file():
+                    existing[name] = [p]
+        overridden = sorted(set(reg) & set(existing))
+        if source == "registered":
+            groups = reg
+        elif source == "existing":
+            groups = existing
         else:
-            lines += ["train: images", "val: images"]
-        lines.append("names:")
+            groups = {**existing, **reg}  # registered takes precedence
+        stats = {"n_registered": len(reg), "n_existing": len(existing),
+                 "n_overridden": len(overridden) if source == "combined" else 0}
+        return groups, stats
+
+    def _list_entry(self, img: Path) -> str:
+        try:
+            return "./" + img.relative_to(self.out).as_posix()
+        except ValueError:
+            return img.as_posix()  # existing images live outside obj_det_labels
+
+    def write_data_yaml(self, val_fraction: float | None = None, seed: int | None = None,
+                        source: str | None = None) -> dict:
+        """Write train.txt / val.txt / data.yaml. Called without arguments (e.g. after a
+        registration) it re-applies the last saved split settings instead of resetting them."""
+        cfg = self.split_settings()
+        given = {k: v for k, v in (("val_fraction", val_fraction), ("seed", seed),
+                                   ("source", source)) if v is not None}
+        cfg.update(given)
+        groups, stats = self.dataset_groups(cfg["source"])  # also validates the source
+        self.out.mkdir(parents=True, exist_ok=True)
+        if given:
+            self.split_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+        keys = sorted(groups, key=reader.natural_key)
+        frac = float(cfg["val_fraction"])
+        split = frac > 0 and len(keys) >= 2
+        val_keys: set[str] = set()
+        if split:
+            shuffled = keys[:]
+            random.Random(int(cfg["seed"])).shuffle(shuffled)
+            n_val = min(len(keys) - 1, max(1, int(round(len(keys) * frac))))
+            val_keys = set(shuffled[:n_val])
+        train = [img for k in keys if k not in val_keys for img in groups[k]]
+        val = [img for k in keys if k in val_keys for img in groups[k]]
+
+        def write_list(fname: str, imgs: list[Path]):
+            (self.out / fname).write_text("".join(self._list_entry(p) + "\n" for p in imgs),
+                                          encoding="utf-8")
+
+        write_list("train.txt", train)
+        if split:
+            write_list("val.txt", val)
+        elif (self.out / "val.txt").is_file():
+            (self.out / "val.txt").unlink()
+
+        names = cls_cfg.names(self.classes())
+        lines = [f"# source: {cfg['source']}, val_fraction: {frac}, seed: {cfg['seed']}"
+                 " (written by imobj_labeler)",
+                 f"path: {json.dumps(self.out.as_posix())}",
+                 "train: train.txt", f"val: {'val.txt' if split else 'train.txt'}", "names:"]
         lines += [f"  {i}: {json.dumps(n)}" for i, n in sorted(names.items())]
         self.yaml_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return {"path": str(self.yaml_path), "n_train": n_train, "n_val": n_val,
-                "split": val_fraction > 0 and len(imgs) >= 2}
+        return {"path": str(self.yaml_path), "source": cfg["source"], "val_fraction": frac,
+                "seed": int(cfg["seed"]), "split": split,
+                "n_train": len(train), "n_val": len(val) if split else len(train),
+                "groups_train": len(keys) - len(val_keys), "groups_val": len(val_keys), **stats}

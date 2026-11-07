@@ -6,7 +6,7 @@ Decisions and constraints to keep in mind when changing the app. Each entry reco
 
 ## 1. The train/val split must keep copies of the same source image together
 
-**Status:** decided, not yet implemented (as of 2026-11-07)
+**Status:** partly implemented (as of 2026-11-07): grouping by source file and split settings that survive registration are done (see entry 3); stable per-file assignments are not.
 
 ### Context
 
@@ -56,3 +56,17 @@ When the data folder is a YOLO `images/` folder with a sibling `../labels/` fold
 - Once a file is registered, the registered labels take precedence for display (the latest version, if there are several). The existing labels are no longer shown for that file.
 - **Revert to existing labels** removes every registered version of the file (image and labels in `obj_det_labels/`), so the display falls back to the untouched `../labels/` file. It only appears when such a file exists. "Unregister" still removes just the current version.
 - Sibling labels are only looked for when the data folder is literally named `images`.
+
+---
+
+## 3. Dataset source: existing, registered or combined
+
+**Status:** implemented (as of 2026-11-07)
+
+The Dataset dialog picks which images go into `data.yaml`: **combined** (the default), **registered** or **existing**. In combined, a file that has registered versions uses those and drops its existing image and labels.
+
+- Nothing is copied. `train.txt` / `val.txt` list image paths: `./images/<stem>.png` for registered images, absolute paths for existing ones, which live outside `obj_det_labels/`. Ultralytics finds each label by replacing the last `/images/` in the path with `/labels/`, which works for both.
+- The split is grouped by source file, which implements the grouping half of entry 1.
+- The settings (source, validation fraction, seed) are saved in `obj_det_labels/split.json` and re-applied after every registration, so a registration no longer resets the split.
+- **Still open from entry 1:** assignments aren't stored per file. Adding a file and re-applying the split reshuffles with the same seed, so some files can move between train and val. Fixing that needs stored per-file assignments.
+- Ultralytics writes its `labels.cache` next to the first label folder it sees, so train and val may share one cache file and rebuild it on each run. This only costs time, not correctness.

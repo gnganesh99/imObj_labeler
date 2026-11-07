@@ -100,6 +100,7 @@ class PredictReq(BaseModel):
 class YamlReq(BaseModel):
     val_fraction: float = Field(0.0, ge=0.0, lt=1.0)
     seed: int = 0
+    source: str = "combined"  # combined | registered | existing
 
 
 # ------------------------------------------------------------------ state / folders
@@ -132,6 +133,16 @@ def open_folder(req: OpenReq):
 class PickReq(BaseModel):
     initial: str = ""
     title: str = "Select folder"
+    purpose: str = "data"  # "data" or "models": picks which remembered folder to start in
+
+
+def _start_folder(initial: str, purpose: str) -> str:
+    """Where a folder dialog opens: the given folder, else the last one used for this purpose."""
+    key = "models_folder" if purpose == "models" else "last_folder"
+    for cand in (initial, State.settings.get(key), *State.settings.get("recent_folders", [])):
+        if cand and Path(cand).expanduser().is_dir():
+            return str(Path(cand).expanduser())
+    return ""
 
 
 @app.post("/api/pick_folder")
@@ -140,7 +151,7 @@ def pick_folder(req: PickReq):
     if not State.native_dialog:
         raise HTTPException(501, "Native folder dialog disabled")
     try:
-        path = folders.pick_folder(req.initial, req.title)
+        path = folders.pick_folder(_start_folder(req.initial, req.purpose), req.title)
     except RuntimeError as e:
         raise HTTPException(409 if "already open" in str(e) else 501, str(e))
     return {"path": path}
@@ -261,12 +272,26 @@ def put_classes(cfg: dict):
         _fail(e)
 
 
+@app.get("/api/dataset")
+def dataset_summary():
+    """Saved split settings and how many source files each dataset source would use."""
+    p = proj()
+    counts = {}
+    for src in ("combined", "registered", "existing"):
+        groups, stats = p.dataset_groups(src)
+        counts[src] = {"files": len(groups), "images": sum(map(len, groups.values())),
+                       "overridden": stats["n_overridden"]}
+    return {"settings": p.split_settings(), "counts": counts,
+            "has_existing": p.sibling_labels_dir() is not None,
+            "yaml_exists": p.yaml_path.is_file(), "out": str(p.out)}
+
+
 @app.post("/api/data_yaml")
 def data_yaml(req: YamlReq):
-    p = proj()
-    if not p.out.is_dir():
-        raise HTTPException(400, "Nothing registered yet")
-    return p.write_data_yaml(req.val_fraction, req.seed)
+    try:
+        return proj().write_data_yaml(req.val_fraction, req.seed, req.source)
+    except ValueError as e:
+        _fail(e)
 
 
 # ------------------------------------------------------------------ prediction

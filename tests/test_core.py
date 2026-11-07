@@ -124,3 +124,43 @@ def test_revert_to_existing_labels(tmp_path):
     back = p.labels_for("c.png", 60, 40)
     assert len(back) == 1 and back[0]["source"] == "existing"
     assert (tmp_path / "labels" / "c.txt").is_file()  # existing labels untouched
+
+
+def test_dataset_sources_and_grouped_split(tmp_path):
+    from PIL import Image
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "labels").mkdir()
+    for i in range(6):
+        Image.fromarray(np.zeros((40, 60, 3), np.uint8)).save(tmp_path / "images" / f"e{i}.jpg")
+        (tmp_path / "labels" / f"e{i}.txt").write_text("0 0.5 0.5 0.2 0.2\n")
+    p = Project(tmp_path / "images")
+    rp = reader.RenderParams()
+    rgb, _ = reader.render(p.path_of("e0.jpg"), rp)
+    box = [ann.bbox(0, 1, 1, 10, 10)]
+    p.register("e0.jpg", rgb, box, rp, overwrite=False)
+    p.register("e0.jpg", rgb, box, rp, overwrite=False)  # e0, e0_1: one source file
+
+    out = tmp_path / "images" / "obj_det_labels"
+    lines = lambda f: (out / f).read_text().split()
+
+    r = p.write_data_yaml(0.5, seed=1, source="combined")
+    assert (r["n_registered"], r["n_existing"], r["n_overridden"]) == (1, 6, 1)
+    allx = lines("train.txt") + lines("val.txt")
+    assert len(allx) == 7 and not any(x.endswith("e0.jpg") for x in allx)  # registered wins
+    reg_sets = [f for f in ("train.txt", "val.txt") if any(x.startswith("./") for x in lines(f))]
+    assert len(reg_sets) == 1  # both registered versions of e0 land in the same set
+    assert r["groups_train"] + r["groups_val"] == 6
+
+    assert p.write_data_yaml(0.0, source="existing")["n_train"] == 6
+    assert lines("train.txt") == [(tmp_path / "images" / f"e{i}.jpg").as_posix() for i in range(6)]
+    assert not (out / "val.txt").exists() and "val: train.txt" in (out / "data.yaml").read_text()
+    assert p.write_data_yaml(0.0, source="registered")["n_train"] == 2
+
+    # a registration re-applies the saved settings instead of resetting them
+    p.write_data_yaml(0.5, seed=1, source="combined")
+    p.register("e3.jpg", rgb, box, rp)
+    assert p.split_settings() == {"source": "combined", "val_fraction": 0.5, "seed": 1}
+    assert "val: val.txt" in (out / "data.yaml").read_text()
+    with pytest.raises(ValueError):
+        p.write_data_yaml(source="nope")

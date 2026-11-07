@@ -39,10 +39,20 @@ Registration writes everything into `obj_det_labels/` inside the data folder:
   labels/<stem>.txt       YOLO labels: "cls cx cy w h" (normalized)
   classes.json            class definitions
   data.yaml               ultralytics dataset file (refreshed on each registration)
+  train.txt / val.txt     image lists used by data.yaml (nothing is copied)
+  split.json              dataset source + split settings, re-applied on each registration
   register_log.csv        provenance: source (manual/model/edited), model, render settings
 ```
 
-Train on the output with `yolo detect train data=<data_folder>/obj_det_labels/data.yaml`. The **Dataset…** dialog can write a random train/val split (`train.txt`/`val.txt`).
+Train on the output with `yolo detect train data=<data_folder>/obj_det_labels/data.yaml`.
+
+The **Dataset…** dialog chooses which images go into `data.yaml` and writes a random train/val split:
+
+- **Combined** (default): existing labels from `../labels` plus registered ones. A file that is registered replaces its existing image and labels.
+- **Registered**: only `obj_det_labels/images` + `labels`.
+- **Existing**: only the data folder's own images with `../labels` (the data folder must be named `images`).
+
+The split is per source file, so all registered versions of one file land in the same set. Nothing is copied: `train.txt` / `val.txt` list the image paths, and YOLO finds each label by swapping `/images/` for `/labels/` in the path. A validation fraction of 0 uses every image for both train and val.
 
 ## Classes (`classes.json`)
 

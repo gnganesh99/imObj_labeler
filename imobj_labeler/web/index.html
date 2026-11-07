@@ -159,12 +159,20 @@
 
 <dialog id="dlg-dataset">
   <h3>Dataset (data.yaml)</h3>
-  <p class="muted small">data.yaml is refreshed on every registration (train = val = all images).
-    Optionally write a random train/val split.</p>
+  <p class="muted small">Writes image lists (train.txt / val.txt) and data.yaml into obj_det_labels/.
+    Nothing is copied. The split is per source file, so all registered versions of a file stay in the same set.
+    These settings are saved and re-applied after every registration.</p>
   <div class="grid2">
+    <label>Images from</label>
+    <select id="ds-source" title="Combined: existing + registered; a registered file replaces its existing image and labels">
+      <option value="combined">Combined</option>
+      <option value="registered">Registered</option>
+      <option value="existing">Existing (../labels)</option>
+    </select>
     <label>Validation fraction</label><input id="ds-val" type="number" min="0" max="0.9" step="0.05" value="0.2">
     <label>Seed</label><input id="ds-seed" type="number" value="0">
   </div>
+  <div id="ds-counts" class="muted small"></div>
   <div id="ds-msg" class="small"></div>
   <div class="row"><span class="spacer"></span><button id="ds-close">Close</button><button id="ds-build" class="primary">Write split</button></div>
 </dialog>
