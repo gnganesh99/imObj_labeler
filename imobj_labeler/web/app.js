@@ -621,7 +621,67 @@ function wire() {
   });
 }
 
+// ---------------------------------------------------------------- theme & layout
+function store(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } }
+function recall(k) { try { return localStorage.getItem(k); } catch { return null; } }
+
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  $("btn-theme").textContent = t === "light" ? "Theme: Light" : "Theme: Dark";
+}
+
+const PANEL_DEFAULT = { left: 240, right: 290 };
+const PANEL_MIN = 160;
+
+function setPanelWidth(side, w) {
+  const max = Math.max(PANEL_MIN, window.innerWidth * 0.45);
+  w = Math.round(Math.min(Math.max(w, PANEL_MIN), max));
+  document.documentElement.style.setProperty(`--${side}-w`, `${w}px`);
+  return w;
+}
+
+function wireResizers() {
+  for (const side of ["left", "right"]) {
+    const saved = parseInt(recall(`imobj.${side}W`), 10);
+    if (saved) setPanelWidth(side, saved);
+  }
+  document.querySelectorAll(".resizer").forEach((el) => {
+    const side = el.dataset.side;
+    el.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      const startX = e.clientX;
+      const startW = document.querySelector(`aside.${side}`).getBoundingClientRect().width;
+      el.classList.add("active");
+      document.body.classList.add("resizing");
+      const move = (ev) => {
+        const dx = ev.clientX - startX;
+        setPanelWidth(side, side === "left" ? startW + dx : startW - dx);
+      };
+      const up = () => {
+        el.classList.remove("active");
+        document.body.classList.remove("resizing");
+        el.removeEventListener("pointermove", move);
+        el.removeEventListener("pointerup", up);
+        el.removeEventListener("pointercancel", up);
+        store(`imobj.${side}W`, document.querySelector(`aside.${side}`).getBoundingClientRect().width);
+      };
+      el.addEventListener("pointermove", move);
+      el.addEventListener("pointerup", up);
+      el.addEventListener("pointercancel", up);
+    });
+    el.addEventListener("dblclick", () => store(`imobj.${side}W`, setPanelWidth(side, PANEL_DEFAULT[side])));
+  });
+}
+
 async function init() {
+  applyTheme(recall("imobj.theme") === "light" ? "light" : "dark");
+  $("btn-theme").onclick = () => {
+    const t = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+    applyTheme(t);
+    store("imobj.theme", t);
+  };
+  wireResizers();
   wire();
   try {
     const st = await api("/api/state");

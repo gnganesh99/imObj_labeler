@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>imObj Labeler</title>
 <link rel="stylesheet" href="style.css">
+<script>try { if (localStorage.getItem("imobj.theme") === "light") document.documentElement.dataset.theme = "light"; } catch (e) {}</script>
 </head>
 <body>
 <header>
@@ -36,6 +37,7 @@
     <div id="file-count" class="muted small"></div>
     <ul id="file-list" class="file-list"></ul>
   </aside>
+  <div class="resizer" data-side="left" title="Drag to resize · double-click to reset"></div>
 
   <main>
     <div class="viewer-bar">
@@ -59,6 +61,7 @@
       <span id="st-msg"></span>
     </div>
   </main>
+  <div class="resizer" data-side="right" title="Drag to resize · double-click to reset"></div>
 
   <aside class="right">
     <section>
@@ -106,6 +109,10 @@
       <button id="btn-register" class="primary">Register (Ctrl+S)</button>
       <button id="btn-unregister" class="link danger hidden">unregister this file</button>
       <div id="out-path" class="muted small path"></div>
+    </section>
+
+    <section class="theme">
+      <button id="btn-theme" title="Toggle dark / light theme">Theme</button>
     </section>
   </aside>
 </div>
