@@ -80,7 +80,7 @@
     <section id="predict-panel" class="hidden">
       <h3>Model</h3>
       <div class="row"><input id="m-folder" type="text" placeholder="Models folder (contains *.pt)">
-        <button id="m-scan">Scan</button></div>
+        <button id="m-browse" title="Choose the models folder">Browse…</button></div>
       <select id="m-select"></select>
       <div id="m-info" class="muted small"></div>
       <div id="m-warn" class="warn small hidden"></div>
@@ -100,14 +100,24 @@
 
     <section class="grow">
       <h3>Objects <span id="obj-count" class="muted"></span>
-        <button id="btn-clear" class="link">clear</button></h3>
+        <button id="btn-clear" class="link">clear</button>
+        <span class="spacer"></span>
+        <select id="obj-sort" title="Order of the object list (Tab follows it)">
+          <option value="conf">Confidence</option>
+          <option value="center">Center first</option>
+          <option value="origin">Origin first</option>
+        </select></h3>
+      <div class="muted small">Use (Shift +) Tab to select (prev) next</div>
       <ul id="obj-list" class="obj-list"></ul>
     </section>
 
     <section class="register">
       <label class="toggle"><input type="checkbox" id="chk-advance" checked> Go to next after registering</label>
+      <label class="toggle" title="Unchecked: keep earlier registrations and save a new copy as <name>_1, <name>_2, …">
+        <input type="checkbox" id="chk-overwrite" checked> Overwrite same filename</label>
       <button id="btn-register" class="primary">Register (Ctrl+S)</button>
       <button id="btn-unregister" class="link danger hidden">unregister this file</button>
+      <button id="btn-revert" class="link danger hidden" title="Delete every registered version of this file and show the labels from ../labels again">revert to existing labels</button>
       <div id="out-path" class="muted small path"></div>
     </section>
 
@@ -118,13 +128,24 @@
 </div>
 
 <!-- dialogs -->
-<dialog id="dlg-folder">
-  <h3>Open data folder</h3>
-  <div class="row"><input id="fb-path" type="text"><button id="fb-go">Go</button></div>
-  <div id="fb-drives" class="row small"></div>
-  <ul id="fb-list" class="fb-list"></ul>
-  <div class="row"><span id="fb-count" class="muted small"></span><span class="spacer"></span>
-    <button id="fb-cancel">Cancel</button><button id="fb-open" class="primary">Open this folder</button></div>
+<dialog id="dlg-folder" class="picker">
+  <h3 id="fb-title">Select folder</h3>
+  <div class="picker-body">
+    <nav id="fb-places" class="places"></nav>
+    <div class="picker-main">
+      <div class="crumbs-row">
+        <button id="fb-up" title="Up one level">↑</button>
+        <div id="fb-crumbs" class="crumbs"></div>
+      </div>
+      <ul id="fb-list" class="fb-list"></ul>
+    </div>
+  </div>
+  <div class="picker-foot">
+    <input id="fb-path" type="text" spellcheck="false" title="Type or paste a path and press Enter">
+    <span id="fb-count" class="muted small"></span>
+  </div>
+  <div class="row"><span class="spacer"></span>
+    <button id="fb-cancel">Cancel</button><button id="fb-open" class="primary">Select this folder</button></div>
 </dialog>
 
 <dialog id="dlg-classes">

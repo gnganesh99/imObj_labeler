@@ -112,10 +112,31 @@ dialog { background: var(--panel); color: var(--text); border: 1px solid var(--l
 dialog::backdrop { background: var(--backdrop); }
 dialog h3 { margin-top: 0; }
 dialog .row { margin-top: 8px; }
-.fb-list { list-style: none; margin: 8px 0 0; padding: 0; height: 300px; overflow-y: auto; border: 1px solid var(--line); border-radius: 5px; }
-.fb-list li { padding: 4px 10px; cursor: pointer; }
+dialog.picker { width: min(760px, 94vw); }
+.picker-body { display: grid; grid-template-columns: 170px 1fr; gap: 10px; height: 380px; }
+.places { display: flex; flex-direction: column; gap: 1px; overflow-y: auto; border-right: 1px solid var(--line); padding-right: 8px; }
+.places .group { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin: 8px 6px 3px; }
+.places .group:first-child { margin-top: 0; }
+.places button { display: flex; align-items: center; gap: 8px; text-align: left; border: none; background: none; padding: 5px 8px; border-radius: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.places button:hover { background: var(--panel2); }
+.places button.active { background: var(--sel); }
+.places .ico { width: 16px; text-align: center; flex: none; }
+.picker-main { display: flex; flex-direction: column; min-width: 0; gap: 6px; }
+.crumbs-row { display: flex; gap: 6px; align-items: center; }
+.crumbs-row > button { padding: 2px 8px; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; min-width: 0; }
+.crumbs button { border: none; background: none; padding: 2px 5px; border-radius: 4px; }
+.crumbs button:hover { background: var(--panel2); }
+.crumbs button:last-child { font-weight: 600; }
+.crumbs .sep { color: var(--muted); }
+.fb-list { list-style: none; margin: 0; padding: 4px; flex: 1; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.fb-list li { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 4px; cursor: pointer; user-select: none; }
 .fb-list li:hover { background: var(--panel2); }
-#fb-drives button { padding: 1px 6px; }
+.fb-list li.empty { color: var(--muted); cursor: default; justify-content: center; padding: 30px; }
+.fb-list li.empty:hover { background: none; }
+.picker-foot { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+.picker-foot input { flex: 1; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.picker-foot .has { color: var(--ok); }
 .cls-table { width: 100%; border-collapse: collapse; }
 .cls-table td, .cls-table th { padding: 3px; text-align: left; }
 .cls-table input[type=number] { width: 60px; }
@@ -123,3 +144,4 @@ dialog .row { margin-top: 8px; }
 .cls-table input[type=color] { width: 40px; height: 26px; border: none; background: none; padding: 0; }
 .keys td { padding: 3px 10px 3px 0; vertical-align: top; }
 .keys td:first-child { color: var(--accent); white-space: nowrap; }
+section h3 select { text-transform: none; letter-spacing: 0; font-size: 12px; padding: 1px 4px; color: var(--text); }

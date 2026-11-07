@@ -11,7 +11,12 @@ pip install -e .[predict]          # or use the existing .venv
 python -m imobj_labeler [DATA_FOLDER] [--models MODELS_FOLDER] [--port 8765]
 ```
 
-The app opens in your browser at http://127.0.0.1:8765. It remembers the last data folder and models folder in `~/.imobj_labeler/settings.json`.
+The app opens in your browser at http://127.0.0.1:8765. It remembers the last data folder, recent folders and the models folder in `~/.imobj_labeler/settings.json`.
+
+**Open folder…** and the model **Browse…** button open the native OS folder dialog, which the local server shows. When that isn't possible, the app uses its own picker with Places (Desktop, Documents, Downloads, …), Recent and Drives. Cases where the native dialog isn't possible:
+- no display or no tkinter;
+- `--no-native-dialog` is set;
+- `--host` is not a local address, because the dialog would appear on the server machine.
 
 ## Modes
 

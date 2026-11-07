@@ -30,7 +30,9 @@ async function api(path, opts = {}) {
   if (!r.ok) {
     let d = r.statusText;
     try { d = (await r.json()).detail || d; } catch { /* ignore */ }
-    throw new Error(typeof d === "string" ? d : JSON.stringify(d));
+    const err = new Error(typeof d === "string" ? d : JSON.stringify(d));
+    err.status = r.status;
+    throw err;
   }
   return r.json();
 }
@@ -144,6 +146,9 @@ async function openFile(name, { keepView = false, reloadImageOnly = false } = {}
       d.snap = JSON.stringify(d.anns);
     }
     d.registered = fi.registered;
+    d.stem = fi.stem;
+    d.versions = fi.versions || [];
+    d.hasExisting = fi.has_existing;
     d.info = fi.info;
     d.usedRegistered = fi.used_registered_params;
     d.params.channel = fi.params.channel;
@@ -191,9 +196,17 @@ function refreshDocUI() {
   chip.className = "chip";
   if (!d) chip.textContent = "";
   else if (d.dirty) { chip.textContent = d.registered ? "modified" : "unsaved"; chip.classList.add("dirty"); }
-  else if (d.registered) { chip.textContent = "registered"; chip.classList.add("done"); }
+  else if (d.registered) {
+    const n = d.versions?.length || 1;
+    chip.textContent = n > 1 ? `registered · ${d.stem} (${n} versions)` : "registered";
+    chip.classList.add("done");
+  }
   else chip.textContent = d.anns.some((a) => a.source === "existing") ? "existing labels" : "new";
+  if (d?.registered && d.versions?.length > 1) chip.title = `Versions: ${d.versions.join(", ")}\nShowing the latest: ${d.stem}`;
+  else chip.title = "";
   $("btn-unregister").classList.toggle("hidden", !d?.registered);
+  $("btn-unregister").textContent = d?.versions?.length > 1 ? `unregister this version (${d.stem})` : "unregister this file";
+  $("btn-revert").classList.toggle("hidden", !(d?.registered && d.hasExisting));
   renderObjects();
   renderFiles();
 }
@@ -265,12 +278,30 @@ function setClass(id) {
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
 // ---------------------------------------------------------------- objects
+// Display order of the object list (indices into d.anns); the annotations themselves are not reordered.
+// conf: highest first, boxes without a confidence (manual) last.
+// center / origin: distance of the box center, in normalized image coords, to (0.5, 0.5) / (0, 0) = top-left.
+function objectOrder() {
+  const d = S.doc;
+  if (!d) return [];
+  const W = editor.width || 1, H = editor.height || 1;
+  const mode = $("obj-sort").value;
+  const key = (a) => {
+    if (mode === "conf") return a.conf == null ? Infinity : -a.conf;
+    const cx = (a.x1 + a.x2) / 2 / W, cy = (a.y1 + a.y2) / 2 / H;
+    const [tx, ty] = mode === "center" ? [0.5, 0.5] : [0, 0];
+    return Math.hypot(cx - tx, cy - ty);
+  };
+  return d.anns.map((a, i) => [key(a), i]).sort((p, q) => p[0] - q[0] || p[1] - q[1]).map((p) => p[1]);
+}
+
 function renderObjects() {
   const ul = $("obj-list"), d = S.doc;
   ul.innerHTML = "";
   if (!d) { $("obj-count").textContent = ""; return; }
   $("obj-count").textContent = `(${d.anns.length})`;
-  d.anns.forEach((a, i) => {
+  objectOrder().forEach((i) => {
+    const a = d.anns[i];
     const li = document.createElement("li");
     li.classList.toggle("sel", i === editor.sel);
     const sw = document.createElement("span");
@@ -318,15 +349,19 @@ async function register() {
     const res = await api("/api/register", { json: {
       name: d.name, params: d.params, annotations: d.anns,
       source: sourceSummary(d.anns),
+      overwrite: $("chk-overwrite").checked,
       model: d.anns.some((a) => a.source === "model" || a.source === "edited") ? (S.model?.name || "") : "",
     } });
     d.dirty = false;
     d.registered = true;
     d.usedRegistered = false;
+    d.stem = res.stem;
+    d.versions = res.versions;
     S.drafts.delete(d.name);
     const f = S.files.find((f) => f.name === d.name);
     if (f) f.registered = true;
-    let m = `Registered ${res.stem}: ${res.n_objects} object(s)`;
+    const how = res.replaced ? "overwritten" : res.versions.length > 1 ? "new copy" : "saved";
+    let m = `Registered ${res.stem} (${how}): ${res.n_objects} object(s)`;
     if (res.unknown_classes.length) m += ` — class id(s) ${res.unknown_classes.join(", ")} not in classes.json`;
     msg(m, res.unknown_classes.length ? "err" : "ok");
     $("out-path").textContent = S.out || "";
@@ -340,19 +375,27 @@ async function register() {
   } catch (e) { fail(e); }
 }
 
-async function unregister() {
+async function removeRegistered(all) {
   const d = S.doc;
-  if (!d?.registered || !confirm(`Remove the registered image and labels for "${d.name}"?`)) return;
+  if (!d?.registered) return;
+  const n = d.versions?.length || 1;
+  const question = all
+    ? `Delete all ${n} registered version${n > 1 ? "s" : ""} of "${d.name}" from obj_det_labels and show the existing labels from ../labels again?`
+    : `Remove the registered image and labels for ${n > 1 ? `version "${d.stem}" of "${d.name}"` : `"${d.name}"`}?`;
+  if (!confirm(question)) return;
   try {
-    await api(`/api/register?${qs({ name: d.name })}`, { method: "DELETE" });
-    const f = S.files.find((f) => f.name === d.name);
-    if (f) f.registered = false;
+    await api(`/api/register?${qs({ name: d.name, all })}`, { method: "DELETE" });
     S.drafts.delete(d.name);
     S.doc = null;
     await openFile(d.name);
-    msg("Unregistered " + d.name, "ok");
+    const f = S.files.find((f) => f.name === d.name);
+    if (f) f.registered = !!S.doc?.registered;
+    renderFiles();
+    msg(all ? `Reverted ${d.name} to existing labels` : "Unregistered " + d.name, "ok");
   } catch (e) { fail(e); }
 }
+const unregister = () => removeRegistered(false);
+const revertToExisting = () => removeRegistered(true);
 
 // ---------------------------------------------------------------- prediction
 async function scanModels(folder) {
@@ -460,25 +503,135 @@ async function setMode(mode) {
 }
 
 // ---------------------------------------------------------------- dialogs
+// Folder selection: the native OS dialog (opened by the local server) when available,
+// otherwise the in-app picker with Places / Recent / Drives.
+async function chooseFolder({ title, initial = "", purpose = "data" }) {
+  msg("Folder dialog open (if you can't see it, check the taskbar)");
+  try {
+    const r = await api("/api/pick_folder", { json: { initial, title } });
+    msg("");
+    return r.path;
+  } catch (e) {
+    msg("");
+    if (e.status === 501) return inAppPicker({ title, initial, purpose });
+    fail(e);
+    return null;
+  }
+}
+
+const picker = { resolve: null, purpose: "data", path: "" };
+const PLACE_ICON = { home: "🏠", desktop: "🖥️", documents: "📄", downloads: "⬇️", pictures: "🖼️",
+  cloud: "☁️", drive: "💽", recent: "🕘", models: "🧠" };
+
+async function inAppPicker({ title, initial, purpose }) {
+  picker.purpose = purpose;
+  $("fb-title").textContent = title;
+  $("fb-open").textContent = purpose === "models" ? "Use this models folder" : "Open this folder";
+  try {
+    renderPlaces(await api("/api/places"));
+    await browse(initial || "");
+  } catch (e) { fail(e); return null; }
+  $("dlg-folder").showModal();
+  return new Promise((res) => { picker.resolve = res; });
+}
+
+function finishPicker(path) {
+  const res = picker.resolve;
+  picker.resolve = null;
+  if ($("dlg-folder").open) $("dlg-folder").close();
+  res?.(path);
+}
+
+function renderPlaces({ places, recent, models_folder }) {
+  const nav = $("fb-places");
+  nav.innerHTML = "";
+  const group = (label, items) => {
+    if (!items.length) return;
+    const h = document.createElement("div");
+    h.className = "group"; h.textContent = label;
+    nav.appendChild(h);
+    for (const it of items) {
+      const b = document.createElement("button");
+      b.dataset.path = it.path;
+      b.title = it.path;
+      b.innerHTML = `<span class="ico">${PLACE_ICON[it.kind] || "📁"}</span><span>${esc(it.name)}</span>`;
+      b.onclick = () => browse(it.path);
+      nav.appendChild(b);
+    }
+  };
+  const baseName = (p) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
+  group("Places", places.filter((p) => p.kind !== "drive"));
+  const rec = recent.map((p) => ({ name: baseName(p), path: p, kind: "recent" }));
+  if (picker.purpose === "models" && models_folder)
+    rec.unshift({ name: baseName(models_folder), path: models_folder, kind: "models" });
+  group("Recent", rec);
+  group("Drives", places.filter((p) => p.kind === "drive"));
+}
+
+function joinPath(base, name) {
+  const sep = base.includes("\\") ? "\\" : "/";
+  return base.replace(/[\\/]+$/, "") + sep + name;
+}
+
 async function browse(path) {
   try {
     const r = await api(`/api/browse?${qs({ path })}`);
+    picker.path = r.path;
     $("fb-path").value = r.path;
+    $("fb-up").disabled = !r.parent;
+    $("fb-up").onclick = () => r.parent && browse(r.parent);
+
+    // breadcrumb: C:\ › Users › ggn
+    const crumbs = $("fb-crumbs");
+    crumbs.innerHTML = "";
+    const win = r.path.includes("\\");
+    const parts = r.path.split(/[\\/]/).filter(Boolean);
+    let acc = win ? "" : "/";
+    parts.forEach((part, i) => {
+      acc = i === 0 ? (win ? part + "\\" : "/" + part) : joinPath(acc, part);
+      const target = acc;
+      if (i > 0 || !win) { const s = document.createElement("span"); s.className = "sep"; s.textContent = "›"; crumbs.appendChild(s); }
+      const b = document.createElement("button");
+      b.textContent = part;
+      b.onclick = () => browse(target);
+      crumbs.appendChild(b);
+    });
+
     const ul = $("fb-list");
     ul.innerHTML = "";
-    if (r.parent) { const li = document.createElement("li"); li.textContent = "⬑ .."; li.onclick = () => browse(r.parent); ul.appendChild(li); }
     for (const dname of r.dirs) {
       const li = document.createElement("li");
-      li.textContent = "📁 " + dname;
-      li.onclick = () => browse(r.path.replace(/[\\/]$/, "") + (r.path.includes("\\") ? "\\" : "/") + dname);
-      li.ondblclick = () => openFolder(r.path.replace(/[\\/]$/, "") + (r.path.includes("\\") ? "\\" : "/") + dname);
+      li.innerHTML = `<span>📁</span><span>${esc(dname)}</span>`;
+      li.onclick = () => browse(joinPath(r.path, dname));
       ul.appendChild(li);
     }
-    $("fb-count").textContent = `${r.n_files} supported file(s) here`;
-    const dv = $("fb-drives");
-    dv.innerHTML = "";
-    for (const drv of r.drives) { const b = document.createElement("button"); b.textContent = drv; b.onclick = () => browse(drv); dv.appendChild(b); }
+    if (!r.dirs.length) {
+      const li = document.createElement("li");
+      li.className = "empty"; li.textContent = "No subfolders";
+      ul.appendChild(li);
+    }
+
+    const cnt = $("fb-count");
+    if (picker.purpose === "models") {
+      cnt.textContent = r.n_models ? `${r.n_models} .pt model(s) here` : "Subfolders are searched for .pt models";
+      cnt.classList.toggle("has", r.n_models > 0);
+    } else {
+      cnt.textContent = r.n_files ? `${r.n_files} supported file(s) here` : "No supported files here";
+      cnt.classList.toggle("has", r.n_files > 0);
+    }
+    document.querySelectorAll("#fb-places button").forEach((b) =>
+      b.classList.toggle("active", b.dataset.path.replace(/[\\/]+$/, "").toLowerCase() === r.path.replace(/[\\/]+$/, "").toLowerCase()));
   } catch (e) { fail(e); }
+}
+
+async function pickDataFolder() {
+  const p = await chooseFolder({ title: "Select data folder", initial: S.folder || "", purpose: "data" });
+  if (p) await openFolder(p);
+}
+
+async function pickModelsFolder() {
+  const p = await chooseFolder({ title: "Select models folder", initial: $("m-folder").value.trim(), purpose: "models" });
+  if (p) await scanModels(p).catch(fail);
 }
 
 async function openFolder(path) {
@@ -560,8 +713,12 @@ window.addEventListener("keydown", (e) => {
   else if (k === "p" || k === "P") { if (S.mode !== "predict") setMode("predict"); predict(); }
   else if (k === "Tab") {
     e.preventDefault();
-    const n = S.doc?.anns.length || 0;
-    if (n) editor.select(((editor.sel + (e.shiftKey ? -1 : 1)) % n + n) % n);
+    const order = objectOrder(), n = order.length;
+    if (n) {
+      const pos = order.indexOf(editor.sel);
+      const next = pos < 0 ? (e.shiftKey ? n - 1 : 0) : ((pos + (e.shiftKey ? -1 : 1)) % n + n) % n;
+      editor.select(order[next]);
+    }
   } else if (k.startsWith("Arrow")) {
     e.preventDefault();
     if (editor.sel >= 0) {
@@ -574,11 +731,11 @@ window.addEventListener("keydown", (e) => {
 // ---------------------------------------------------------------- wiring
 function wire() {
   document.querySelectorAll("#modes button").forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
-  $("btn-open").onclick = () => { browse(S.folder || ""); $("dlg-folder").showModal(); };
-  $("fb-go").onclick = () => browse($("fb-path").value);
-  $("fb-path").onkeydown = (e) => { if (e.key === "Enter") browse($("fb-path").value); };
-  $("fb-cancel").onclick = () => $("dlg-folder").close();
-  $("fb-open").onclick = () => openFolder($("fb-path").value);
+  $("btn-open").onclick = pickDataFolder;
+  $("fb-path").onkeydown = (e) => { if (e.key === "Enter") browse($("fb-path").value.trim()); };
+  $("fb-cancel").onclick = () => finishPicker(null);
+  $("fb-open").onclick = () => finishPicker(picker.path);
+  $("dlg-folder").addEventListener("close", () => finishPicker(null));
   $("btn-classes").onclick = openClassesDialog;
   $("cls-cancel").onclick = () => $("dlg-classes").close();
   $("cls-save").onclick = saveClasses;
@@ -606,11 +763,17 @@ function wire() {
     if (!d?.anns.length || !confirm(`Remove all ${d.anns.length} boxes from this image?`)) return;
     d.anns.splice(0); editor.select(-1); editor.setAnnotations(d.anns); commit();
   };
+  const savedSort = recall("imobj.objSort");
+  if (savedSort && [...$("obj-sort").options].some((o) => o.value === savedSort)) $("obj-sort").value = savedSort;
+  $("obj-sort").onchange = () => { store("imobj.objSort", $("obj-sort").value); renderObjects(); };
+  if (recall("imobj.overwrite") === "0") $("chk-overwrite").checked = false;
+  $("chk-overwrite").onchange = () => store("imobj.overwrite", $("chk-overwrite").checked ? "1" : "0");
   $("btn-register").onclick = register;
   $("btn-unregister").onclick = unregister;
+  $("btn-revert").onclick = revertToExisting;
 
-  $("m-scan").onclick = () => scanModels($("m-folder").value.trim()).catch(fail);
-  $("m-folder").onkeydown = (e) => { if (e.key === "Enter") $("m-scan").click(); };
+  $("m-browse").onclick = pickModelsFolder;
+  $("m-folder").onkeydown = (e) => { if (e.key === "Enter") scanModels($("m-folder").value.trim()).catch(fail); };
   $("m-select").onchange = selectModel;
   $("m-conf").oninput = onThresholdChange;
   $("m-iou").oninput = onThresholdChange;
@@ -693,7 +856,7 @@ async function init() {
     try { mode = localStorage.getItem("imobj.mode") || "label"; } catch { /* ignore */ }
     S.mode = mode;
     if (st.folder) await loadFiles();
-    else { $("btn-open").click(); }
+    else $("empty").textContent = "Click “Open folder…” to choose a data folder.";
     if (st.settings.models_folder) await scanModels(st.settings.models_folder).catch(fail);
     await setMode(mode);
   } catch (e) { fail(e); }

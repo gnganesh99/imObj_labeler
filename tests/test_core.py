@@ -74,3 +74,53 @@ def test_register_writes_dataset(tmp_path):
     assert "names:" in (out / "data.yaml").read_text()
     back = p.labels_for("a.png", 60, 40)
     assert back[0]["x1"] == pytest.approx(6) and back[0]["source"] == "registered"
+
+
+def test_register_versions_without_overwrite(tmp_path):
+    from PIL import Image
+
+    Image.fromarray(np.zeros((40, 60, 3), np.uint8)).save(tmp_path / "b.png")
+    p = Project(tmp_path)
+    rgb, _ = reader.render(p.path_of("b.png"), reader.RenderParams())
+    rp = reader.RenderParams()
+    one, two = [ann.bbox(0, 1, 1, 10, 10)], [ann.bbox(0, 1, 1, 10, 10)] * 2
+
+    assert p.register("b.png", rgb, one, rp, overwrite=False)["stem"] == "b"
+    r = p.register("b.png", rgb, two, rp, overwrite=False)
+    assert r["stem"] == "b_1" and not r["replaced"] and r["versions"] == ["b", "b_1"]
+    assert p.register("b.png", rgb, one, rp, overwrite=False)["stem"] == "b_2"
+    assert p.current_stem("b.png") == "b_2" and len(p.labels_for("b.png", 60, 40)) == 1
+
+    # overwrite replaces the current (latest) version only
+    r = p.register("b.png", rgb, two, rp, overwrite=True)
+    assert r["stem"] == "b_2" and r["replaced"] and len(r["versions"]) == 3
+    assert (tmp_path / "obj_det_labels" / "labels" / "b.txt").read_text().count("\n") == 1
+
+    # unregister removes the current version; the previous one becomes current
+    assert p.unregister("b.png") and p.current_stem("b.png") == "b_1"
+    assert p.status() == {"b.png": True}
+
+
+def test_revert_to_existing_labels(tmp_path):
+    from PIL import Image
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "labels").mkdir()
+    Image.fromarray(np.zeros((40, 60, 3), np.uint8)).save(tmp_path / "images" / "c.png")
+    (tmp_path / "labels" / "c.txt").write_text("0 0.5 0.5 0.2 0.2\n")
+    p = Project(tmp_path / "images")
+    rgb, _ = reader.render(p.path_of("c.png"), reader.RenderParams())
+    rp = reader.RenderParams()
+    assert p.existing_label_path("c.png") and p.labels_for("c.png", 60, 40)[0]["source"] == "existing"
+
+    two = [ann.bbox(0, 1, 1, 10, 10)] * 2
+    p.register("c.png", rgb, two, rp, overwrite=False)
+    p.register("c.png", rgb, two, rp, overwrite=False)
+    assert p.versions("c.png") == ["c", "c_1"]
+    assert p.labels_for("c.png", 60, 40)[0]["source"] == "registered"  # registered wins
+
+    assert p.unregister("c.png", all_versions=True)
+    assert p.versions("c.png") == [] and not p.is_registered("c.png")
+    back = p.labels_for("c.png", 60, 40)
+    assert len(back) == 1 and back[0]["source"] == "existing"
+    assert (tmp_path / "labels" / "c.txt").is_file()  # existing labels untouched

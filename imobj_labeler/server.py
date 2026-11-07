@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
-import string
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +13,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from . import classes as cls_cfg
+from . import folders
 from . import reader
 from .project import Project
 
@@ -25,6 +24,7 @@ SETTINGS_PATH = Path.home() / ".imobj_labeler" / "settings.json"
 class State:
     project: Project | None = None
     settings: dict = {}
+    native_dialog: bool = True  # False for remote/headless servers -> in-app picker
 
     @classmethod
     def load_settings(cls):
@@ -84,6 +84,7 @@ class RegisterReq(BaseModel):
     params: Params
     annotations: list[dict[str, Any]]
     source: str = "manual"
+    overwrite: bool = True
     model: str = ""
 
 
@@ -112,6 +113,11 @@ def get_state():
             "colormaps": reader.COLORMAPS}
 
 
+def _remember_recent(key: str, path: str, keep: int = 8):
+    recent = [p for p in State.settings.get(key, []) if p != path]
+    State.save_settings(**{key: [path] + recent[: keep - 1]})
+
+
 @app.post("/api/open")
 def open_folder(req: OpenReq):
     try:
@@ -119,25 +125,53 @@ def open_folder(req: OpenReq):
     except Exception as e:
         _fail(e)
     State.save_settings(last_folder=str(State.project.data))
+    _remember_recent("recent_folders", str(State.project.data))
     return get_state()
+
+
+class PickReq(BaseModel):
+    initial: str = ""
+    title: str = "Select folder"
+
+
+@app.post("/api/pick_folder")
+def pick_folder(req: PickReq):
+    """Native OS folder dialog (shown on the machine running the server)."""
+    if not State.native_dialog:
+        raise HTTPException(501, "Native folder dialog disabled")
+    try:
+        path = folders.pick_folder(req.initial, req.title)
+    except RuntimeError as e:
+        raise HTTPException(409 if "already open" in str(e) else 501, str(e))
+    return {"path": path}
+
+
+@app.get("/api/places")
+def places():
+    recent = [p for p in State.settings.get("recent_folders", []) if Path(p).is_dir()]
+    models = State.settings.get("models_folder")
+    return {"places": folders.places(), "recent": recent,
+            "models_folder": models if models and Path(models).is_dir() else None}
 
 
 @app.get("/api/browse")
 def browse(path: str = ""):
-    drives = []
-    if os.name == "nt":
-        drives = [f"{d}:\\" for d in string.ascii_uppercase if Path(f"{d}:\\").exists()]
     p = Path(path).expanduser() if path else Path(State.settings.get("last_folder") or Path.home())
     if not p.is_dir():
         p = Path.home()
     p = p.resolve()
     try:
-        dirs = sorted((d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")),
+        dirs = sorted((d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith((".", "$"))),
                       key=reader.natural_key)
-    except PermissionError:
+    except (PermissionError, OSError):
         dirs = []
-    return {"path": str(p), "parent": str(p.parent) if p.parent != p else None,
-            "dirs": dirs, "n_files": len(reader.list_files(p)), "drives": drives}
+    try:
+        n_models = sum(1 for _ in p.glob("*.pt"))
+    except OSError:
+        n_models = 0
+    return {"path": str(p), "name": p.name or str(p),
+            "parent": str(p.parent) if p.parent != p else None,
+            "dirs": dirs, "n_files": len(reader.list_files(p)), "n_models": n_models}
 
 
 @app.get("/api/files")
@@ -171,7 +205,8 @@ def file_info(name: str, channel: str | None = None, flatten: str = "plane",
     params.channel = info.get("channel")
     return {"name": name, "info": info, "params": params.as_dict(),
             "registered": p.is_registered(name), "used_registered_params": bool(reg_params),
-            "labels": labels, "stem": p.stem_for(name)}
+            "labels": labels, "stem": p.current_stem(name) or p.stem_for(name),
+            "versions": p.versions(name), "has_existing": p.existing_label_path(name) is not None}
 
 
 @app.get("/api/image")
@@ -197,7 +232,8 @@ def register(req: RegisterReq):
         params = req.params.rp()
         rgb, info = reader.render(p.path_of(req.name), params)
         params.channel = info.get("channel")
-        res = p.register(req.name, rgb, req.annotations, params, req.source, req.model)
+        res = p.register(req.name, rgb, req.annotations, params, req.source, req.model,
+                         overwrite=req.overwrite)
     except HTTPException:
         raise
     except Exception as e:
@@ -206,8 +242,8 @@ def register(req: RegisterReq):
 
 
 @app.delete("/api/register")
-def unregister(name: str):
-    return {"removed": proj().unregister(name)}
+def unregister(name: str, all: bool = False):
+    return {"removed": proj().unregister(name, all_versions=all)}
 
 
 @app.get("/api/classes")

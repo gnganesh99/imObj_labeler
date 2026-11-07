@@ -14,12 +14,18 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--no-native-dialog", action="store_true",
+                    help="use the in-app folder picker instead of the OS dialog "
+                         "(automatic when --host is not a local address)")
     a = ap.parse_args(argv)
 
     import uvicorn
 
     from . import server
     from .project import Project
+
+    local = a.host in ("127.0.0.1", "localhost", "::1")
+    server.State.native_dialog = local and not a.no_native_dialog
 
     if a.folder:
         server.State.project = Project(Path(a.folder))

@@ -6,6 +6,12 @@
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "imobj_labeler", "--no-browser", "--port", "8765"],
       "port": 8765
+    },
+    {
+      "name": "imobj-labeler-inapp-picker",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "imobj_labeler", "--no-browser", "--no-native-dialog", "--port", "8766"],
+      "port": 8766
     }
   ]
 }

@@ -58,12 +58,51 @@ class Project:
             raise FileNotFoundError(name)
         return p
 
+    # A file can be registered several times (overwrite off): <stem>, <stem>_1, <stem>_2, ...
+    # register_log.csv maps each saved stem back to its source file.
+    def _log_rows(self) -> list[dict]:
+        if not self.log_path.is_file():
+            return []
+        with self.log_path.open(newline="", encoding="utf-8") as f:
+            return list(csv.DictReader(f))
+
+    def _exists(self, stem: str) -> bool:
+        return (self.labels / f"{stem}.txt").is_file()
+
+    def versions(self, name: str, rows: list[dict] | None = None) -> list[str]:
+        """Saved stems of ``name`` that still exist, oldest registration first."""
+        rows = self._log_rows() if rows is None else rows
+        out: list[str] = []
+        base = self.stem_for(name)
+        for r in rows:
+            s = r.get("stem")
+            if r.get("file") == name and s:
+                if s in out:
+                    out.remove(s)  # re-registered (overwritten): move to the end
+                out.append(s)
+        if base not in out:
+            out.insert(0, base)
+        return [s for s in out if self._exists(s)]
+
+    def current_stem(self, name: str) -> str | None:
+        """Most recently registered version (shown and edited in the app)."""
+        v = self.versions(name)
+        return v[-1] if v else None
+
+    def _next_free_stem(self, base: str) -> str:
+        if not (self._exists(base) or (self.images / f"{base}.png").is_file()):
+            return base
+        i = 1
+        while self._exists(f"{base}_{i}") or (self.images / f"{base}_{i}.png").is_file():
+            i += 1
+        return f"{base}_{i}"
+
     def is_registered(self, name: str) -> bool:
-        return (self.labels / f"{self.stem_for(name)}.txt").is_file()
+        return bool(self.versions(name))
 
     def status(self) -> dict[str, bool]:
-        done = {p.stem for p in self.labels.glob("*.txt")} if self.labels.is_dir() else set()
-        return {f: self.stem_for(f) in done for f in self.files()}
+        rows = self._log_rows()
+        return {f: bool(self.versions(f, rows)) for f in self.files()}
 
     def sibling_labels_dir(self) -> Path | None:
         """If the data folder is a YOLO ``images/`` folder, its ``labels/`` sibling."""
@@ -73,24 +112,21 @@ class Project:
         return None
 
     def labels_for(self, name: str, width: int, height: int) -> list[dict]:
-        stem = self.stem_for(name)
-        reg = self.labels / f"{stem}.txt"
-        if reg.is_file():
-            return ann.read_yolo(reg, width, height, source="registered")
+        stem = self.current_stem(name)
+        if stem:
+            return ann.read_yolo(self.labels / f"{stem}.txt", width, height, source="registered")
         sib = self.sibling_labels_dir()
         if sib is not None:
             return ann.read_yolo(sib / f"{Path(name).stem}.txt", width, height, source="existing")
         return []
 
     def registered_params(self, name: str) -> dict | None:
-        """Render settings used for the last registration of ``name``."""
-        if not self.log_path.is_file():
-            return None
+        """Render settings used for the current registered version of ``name``."""
+        stem = self.current_stem(name)
         last = None
-        with self.log_path.open(newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                if row.get("file") == name:
-                    last = row
+        for row in self._log_rows():
+            if row.get("file") == name and row.get("stem") == stem:
+                last = row
         if not last:
             return None
         return {"channel": last["channel"] or None, "flatten": last["flatten"],
@@ -109,9 +145,17 @@ class Project:
     # ------------------------------------------------------------ register
     def register(self, name: str, rgb: np.ndarray, annotations: list[dict],
                  params: reader.RenderParams, source: str = "manual",
-                 model: str = "") -> dict:
+                 model: str = "", overwrite: bool = True) -> dict:
+        """Save image + labels. ``overwrite`` replaces the current version of this file;
+        otherwise a new copy is written as ``<stem>_1``, ``<stem>_2``, ..."""
         h, w = rgb.shape[:2]
-        stem = self.stem_for(name)
+        base = self.stem_for(name)
+        if overwrite:
+            stem = self.current_stem(name) or base
+            replaced = self._exists(stem)
+        else:
+            stem = self._next_free_stem(base)
+            replaced = False
         self.images.mkdir(parents=True, exist_ok=True)
         self.labels.mkdir(parents=True, exist_ok=True)
         if not self.classes_path.is_file():
@@ -131,17 +175,27 @@ class Project:
         self.write_data_yaml()
         known = set(cls_cfg.names(self.classes()))
         unknown = sorted({int(a["cls"]) for a in annotations} - known)
-        return {"stem": stem, "n_objects": n, "unknown_classes": unknown,
+        return {"stem": stem, "n_objects": n, "unknown_classes": unknown, "replaced": replaced,
+                "versions": self.versions(name),
                 "image": str(self.images / f"{stem}.png"),
                 "label": str(self.labels / f"{stem}.txt")}
 
-    def unregister(self, name: str) -> bool:
-        stem = self.stem_for(name)
+    def existing_label_path(self, name: str) -> Path | None:
+        """The read-only label file for ``name`` in the sibling ``../labels`` folder."""
+        sib = self.sibling_labels_dir()
+        p = sib / f"{Path(name).stem}.txt" if sib is not None else None
+        return p if p is not None and p.is_file() else None
+
+    def unregister(self, name: str, all_versions: bool = False) -> bool:
+        """Remove the current version (an earlier one, if any, becomes current), or with
+        ``all_versions`` every registered version, so existing labels are shown again."""
+        stems = self.versions(name) if all_versions else [self.current_stem(name)]
         removed = False
-        for p in (self.labels / f"{stem}.txt", self.images / f"{stem}.png"):
-            if p.is_file():
-                p.unlink()
-                removed = True
+        for stem in filter(None, stems):
+            for p in (self.labels / f"{stem}.txt", self.images / f"{stem}.png"):
+                if p.is_file():
+                    p.unlink()
+                    removed = True
         return removed
 
     # ------------------------------------------------------------ data.yaml
