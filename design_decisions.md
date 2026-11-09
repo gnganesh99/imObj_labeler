@@ -85,3 +85,16 @@ The Dataset dialog can write saved augmented copies, created only when the user 
 - **Staleness:** the manifest stores the source image and label modification times. Copies whose source changed, or left the dataset, are skipped and counted until augmentation is run again.
 - **Val copies:** listed in `val.txt` together with the clean val images (what the user asked for), and on their own in `val_aug.txt` as `test:`, so the noisy-image score can be read separately with `split=test`. Note that `best.pt` is then chosen on clean and augmented val together.
 - The noise RNG is seeded with the split seed, so the same settings give the same copies.
+
+---
+
+## 5. Training runs outside the app: data bundles plus one common train_yolo.py
+
+**Status:** step 1 implemented (as of 2026-11-09). Remote control from the app (upload, start, watch, fetch over SSH) and "import run" are planned.
+
+- **Separate process:** training takes hours, so it runs as a separate process on the GPU machine. Closing or restarting the app never touches a run, and `--resume` continues from `last.pt` after an interruption.
+- **Bundles hold data and config, not code.** One versioned `imobj_labeler/train_yolo.py` trains any bundle. The bundle's `format_version` and the script's `SUPPORTED_FORMATS` must agree, and the script refuses mismatches. Each run copies the script and the config it used into the run folder, so every `best.pt` can be traced back to exactly what produced it.
+- **Standard YOLO layout, files copied:** the app's `train.txt` uses absolute Windows paths for existing images, which can't work on a Linux server. Copying also gives train and val their own `labels.cache`.
+- **No `path:` in the bundle's data.yaml:** ultralytics resolves a relative `path:` against its global datasets folder, not the yaml's folder. Without the key, it uses the yaml's own folder, provided the yaml is passed as an absolute path, which `train_yolo.py` does.
+- **No silent CPU fallback:** without CUDA the script stops instead of training for days on CPU.
+- **Online loggers off by default:** an installed wandb starts automatically, can wait for a login on a detached run, and rejects an absolute project folder. They are switched off in memory with `dict.__setitem__`, because `SETTINGS[...] = ...` would rewrite ultralytics' global settings file.

@@ -320,6 +320,43 @@ def remove_augment():
     return proj().remove_augmentation()
 
 
+# ------------------------------------------------------------------ training bundle
+TRAIN_SCRIPT = Path(__file__).parent / "train_yolo.py"
+
+
+@app.get("/api/bundle")
+def bundle_info():
+    """Defaults for the export dialog: what the current split would export."""
+    from .project import TRAIN_DEFAULT
+
+    p = proj()
+    base = p.data.parent.name if p.data.name.lower() == "images" else p.data.name
+    stamp = __import__("datetime").datetime.now().strftime("%Y%m%d-%H%M")
+    return {**p.bundle_summary(), "defaults": TRAIN_DEFAULT,
+            "suggested_name": f"{base}_{stamp}", "script": str(TRAIN_SCRIPT),
+            "last_dest": State.settings.get("bundle_dest")}
+
+
+class BundleReq(BaseModel):
+    dest: str          # parent folder
+    name: str
+    config: dict[str, Any]
+
+
+@app.post("/api/bundle")
+def export_bundle(req: BundleReq):
+    p = proj()
+    name = req.name.strip()
+    if not name or any(c in name for c in '\\/:*?"<>|') or name in (".", ".."):
+        raise HTTPException(400, "Bundle name must be a plain folder name")
+    try:
+        res = p.export_bundle(Path(req.dest).expanduser() / name, req.config)
+    except (ValueError, FileExistsError, OSError) as e:
+        _fail(e)
+    State.save_settings(bundle_dest=req.dest)
+    return {**res, "script": str(TRAIN_SCRIPT)}
+
+
 # ------------------------------------------------------------------ prediction
 @app.get("/api/models")
 def models(folder: str = ""):

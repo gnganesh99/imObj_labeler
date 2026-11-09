@@ -34,6 +34,14 @@ LOG_FIELDS = ["time", "file", "stem", "n_objects", "source", "model", "channel",
 DATASET_SOURCES = ("combined", "registered", "existing")
 SPLIT_DEFAULT = {"source": "combined", "val_fraction": 0.0, "seed": 0}
 YOLO_IMAGE_EXT = {".bmp", ".dng", ".jpeg", ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp"}
+BUNDLE_FORMAT = 1  # bump when the bundle layout changes; train_yolo.py checks it
+TRAIN_DEFAULT = {
+    "name": "train", "model": "yolov8n.pt", "epochs": 300, "imgsz": 256, "batch": 16,
+    "patience": 50, "save_period": 50, "device": "0", "workers": 8, "seed": 0,
+    # on-the-fly ultralytics augmentation (any model.train() argument can go here)
+    "args": {"fliplr": 0.5, "flipud": 0.5, "degrees": 0.0, "hsv_h": 0.0, "hsv_s": 0.0,
+             "hsv_v": 0.3},
+}
 
 
 class Project:
@@ -442,3 +450,104 @@ class Project:
         train, val, stale = self._aug_entries(cfg, groups, val_keys)
         return {"settings": cfg.get("aug"), "n_train": len(train), "n_val": len(val),
                 "n_stale": stale}
+
+    # ------------------------------------------------------------ training bundle
+    # A self-contained copy of the current split for training on another machine:
+    #   images/train, images/val, labels/train, labels/val  (standard YOLO layout)
+    #   data.yaml          relative paths, no "path:" key (train_yolo.py passes it absolute)
+    #   train_config.json  model + training arguments, read by train_yolo.py
+    #   manifest.json      where every file came from, split/aug settings, versions
+    def bundle_summary(self) -> dict:
+        """What an export would contain with the current saved split + augmentation."""
+        cfg = self.split_settings()
+        groups, stats, keys, val_keys, split = self._split(cfg)
+        train_aug, val_aug, n_stale = self._aug_entries(cfg, groups, val_keys)
+        n_train = sum(len(groups[k]) for k in keys if k not in val_keys) + len(train_aug)
+        n_val = sum(len(groups[k]) for k in keys if k in val_keys) + len(val_aug)
+        return {"split": {k: cfg[k] for k in ("source", "val_fraction", "seed")},
+                "aug": cfg.get("aug"), "is_split": split, "n_train": n_train,
+                "n_val": n_val if split else 0, "n_train_aug": len(train_aug),
+                "n_val_aug": len(val_aug), "n_aug_stale": n_stale,
+                "default_dest": str(self.out / "bundles")}
+
+    def export_bundle(self, dest: str | Path, train_config: dict) -> dict:
+        """Copy the current split (with augmented copies) into ``dest`` as a training bundle."""
+        dest = Path(dest).expanduser()
+        if dest.exists() and any(dest.iterdir()):
+            raise FileExistsError(f"Bundle folder already exists and is not empty: {dest}")
+        cfg = self.split_settings()
+        groups, stats, keys, val_keys, split = self._split(cfg)
+        train_aug, val_aug, n_stale = self._aug_entries(cfg, groups, val_keys)
+        train = [img for k in keys if k not in val_keys for img in groups[k]] + train_aug
+        val = [img for k in keys if k in val_keys for img in groups[k]] + val_aug
+        if not train:
+            raise ValueError("The dataset has no labelled images: register some, or check "
+                             "the Dataset dialog's source")
+        aug_set = set(train_aug) | set(val_aug)
+        sets = {"train": train, "val": val} if split else {"train": train}
+
+        tcfg = {**TRAIN_DEFAULT, **{k: v for k, v in train_config.items() if v is not None}}
+        tcfg["args"] = {**TRAIN_DEFAULT["args"], **(train_config.get("args") or {})}
+        model_src = Path(str(tcfg["model"])).expanduser()
+        dest.mkdir(parents=True, exist_ok=True)
+        if model_src.is_file():  # start from a local model: ship it inside the bundle
+            (dest / "weights_init").mkdir()
+            shutil.copy2(model_src, dest / "weights_init" / model_src.name)
+            tcfg["model"] = f"weights_init/{model_src.name}"
+            tcfg["model_source"] = str(model_src)
+        tcfg["format_version"] = BUNDLE_FORMAT
+
+        files, bundle_name = [], {}
+        for s, imgs in sets.items():
+            (dest / "images" / s).mkdir(parents=True)
+            (dest / "labels" / s).mkdir(parents=True)
+            used: set[str] = set()
+            for img in imgs:
+                stem, i = img.stem, 1
+                while stem in used:  # same stem from two places
+                    stem, i = f"{img.stem}_{i}", i + 1
+                used.add(stem)
+                name = stem + img.suffix.lower()
+                shutil.copy2(img, dest / "images" / s / name)
+                rows = augment.read_boxes(augment.label_path_for(img))  # normalised: "0 cx cy w h"
+                augment.write_boxes(dest / "labels" / s / f"{stem}.txt", rows)
+                bundle_name[(s, img)] = f"images/{s}/{name}"
+                files.append({"file": f"images/{s}/{name}", "source": str(img),
+                              "augmented": img in aug_set, "boxes": len(rows)})
+        if val_aug:
+            (dest / "val_aug.txt").write_text(
+                "".join(f"./{bundle_name[('val', p)]}\n" for p in val_aug), encoding="utf-8")
+
+        names = cls_cfg.names(self.classes())
+        lines = [f"# imObj Labeler training bundle (format {BUNDLE_FORMAT}).",
+                 "# No 'path:' key: train_yolo.py passes this file's absolute path, so the paths",
+                 "# below resolve next to it. Training by hand: yolo detect train data=/abs/path/data.yaml",
+                 "train: images/train", f"val: images/{'val' if split else 'train'}"]
+        if val_aug:
+            lines.append("test: val_aug.txt  # augmented val copies alone: yolo val ... split=test")
+        lines.append("names:")
+        lines += [f"  {i}: {json.dumps(n)}" for i, n in sorted(names.items())]
+        (dest / "data.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (dest / "train_config.json").write_text(json.dumps(tcfg, indent=2), encoding="utf-8")
+
+        counts = {"train": len(train), "val": len(val) if split else 0,
+                  "train_aug": len(train_aug), "val_aug": len(val_aug),
+                  "aug_stale_left_out": n_stale}
+        manifest = {"format_version": BUNDLE_FORMAT,
+                    "created": datetime.now().isoformat(timespec="seconds"),
+                    "app": "imobj_labeler", "ultralytics_at_export": _pkg_version("ultralytics"),
+                    "data_folder": str(self.data), "split": {k: cfg[k] for k in
+                                                             ("source", "val_fraction", "seed")},
+                    "augmentation": cfg.get("aug"), "classes": names, "counts": counts,
+                    "files": files}
+        (dest / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+        return {"path": str(dest), "name": dest.name, **counts, "split": split,
+                "model": tcfg["model"]}
+
+
+def _pkg_version(name: str) -> str | None:
+    try:
+        from importlib.metadata import version
+        return version(name)
+    except Exception:
+        return None

@@ -248,3 +248,62 @@ def test_rotated_copies_get_noise_with_probability(tmp_path):
     img = np.asarray(Image.open(p.aug_dir / "images" / noisy[0]))
     assert img.shape == (60, 40) and img.std() > 3  # rotated and noisy
     assert p.split_settings()["aug"]["rot_noise_p"] == 0.5
+
+
+def _small_dataset(tmp_path, n=6):
+    from PIL import Image
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "labels").mkdir()
+    for i in range(n):
+        Image.fromarray(np.full((40, 60), 100, np.uint8)).save(tmp_path / "images" / f"e{i}.png")
+        (tmp_path / "labels" / f"e{i}.txt").write_text("0.0\t0.5\t0.5\t0.2\t0.2\n")
+    return Project(tmp_path / "images")
+
+
+def test_export_bundle_layout(tmp_path):
+    import json
+
+    p = _small_dataset(tmp_path)
+    p.write_data_yaml(0.34, seed=0, source="existing")
+    p.augment(["rot90"], val=True, train=True)
+    model = tmp_path / "start.pt"
+    model.write_bytes(b"fake")
+    r = p.export_bundle(tmp_path / "bundle", {"model": str(model), "epochs": 3})
+    b = tmp_path / "bundle"
+    assert (r["train"], r["val"], r["train_aug"], r["val_aug"]) == (8, 4, 4, 2)
+    assert len(list((b / "images" / "train").iterdir())) == 8
+    assert len(list((b / "labels" / "val").iterdir())) == 4
+    assert (b / "labels" / "train" / f"{next((b / 'images' / 'train').iterdir()).stem}.txt").is_file()
+    lab = next((b / "labels" / "val").iterdir()).read_text()
+    assert lab.startswith("0 ") and "\t" not in lab  # normalised
+    y = (b / "data.yaml").read_text()
+    assert not any(line.startswith("path:") for line in y.splitlines())
+    assert "train: images/train" in y and "test: val_aug.txt" in y
+    assert all(x.startswith("./images/val/") for x in (b / "val_aug.txt").read_text().split())
+    cfg = json.loads((b / "train_config.json").read_text())
+    assert cfg["model"] == "weights_init/start.pt" and (b / "weights_init" / "start.pt").is_file()
+    assert cfg["epochs"] == 3 and cfg["imgsz"] == 256 and cfg["format_version"] == 1
+    man = json.loads((b / "manifest.json").read_text())
+    assert len(man["files"]) == 12 and man["split"]["seed"] == 0
+    with pytest.raises(FileExistsError):
+        p.export_bundle(tmp_path / "bundle", {})
+
+
+def test_train_script_checks_bundle(tmp_path):
+    import subprocess, sys
+
+    pytest.importorskip("ultralytics")
+    p = _small_dataset(tmp_path)
+    p.write_data_yaml(0.34, seed=0, source="existing")
+    p.export_bundle(tmp_path / "bundle", {})
+    script = Path(__file__).resolve().parents[1] / "imobj_labeler" / "train_yolo.py"
+    run = lambda *a: subprocess.run([sys.executable, str(script), *a], capture_output=True, text=True)
+    assert "1.0" in run("--version").stdout
+    r = run(str(tmp_path / "bundle"), "--check", "--allow-cpu")
+    assert r.returncode == 0, r.stderr
+    assert "train: 4 images" in r.stdout and "val  : 2 images" in r.stdout
+    cfg = tmp_path / "bundle" / "train_config.json"
+    cfg.write_text(cfg.read_text().replace('"format_version": 1', '"format_version": 99'))
+    r = run(str(tmp_path / "bundle"), "--check", "--allow-cpu")
+    assert r.returncode == 2 and "not supported" in r.stderr

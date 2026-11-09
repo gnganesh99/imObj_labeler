@@ -66,6 +66,35 @@ The Dataset dialog's **Create augmented copies** button writes saved copies of t
 - When val copies exist, `data.yaml` gets `test: val_aug.txt`. `yolo val data=.../data.yaml split=test` then scores the model on the augmented (e.g. noisy) val images alone, while `val.txt` holds the clean and augmented val images together.
 - **remove augmented copies** deletes `aug/` and takes the copies out of the lists.
 
+## Training on a GPU machine
+
+**Train…** exports a *training bundle*: a self-contained copy of the current split (set in **Dataset…**, including augmented copies) that trains anywhere with the common `imobj_labeler/train_yolo.py`.
+
+```
+<bundle>/
+  images/train, images/val, labels/train, labels/val   standard YOLO layout, labels normalised to "0 cx cy w h"
+  data.yaml           relative paths (no "path:" key)
+  val_aug.txt         augmented val copies alone (data.yaml "test:"), if any
+  train_config.json   model, epochs, imgsz, batch, patience, save_period, device, YOLO args
+  manifest.json       source of every file, split/augmentation settings, versions
+  weights_init/       the starting model, if you chose a local .pt
+```
+
+The script needs only `ultralytics` and CUDA `torch`; copy it to the server once (again after app updates):
+
+```bash
+python train_yolo.py BUNDLE --check      # validate bundle + CUDA, don't train
+nohup python train_yolo.py BUNDLE > BUNDLE/train.log 2>&1 &
+python train_yolo.py BUNDLE --resume     # continue the latest run from last.pt
+python train_yolo.py BUNDLE --epochs 5   # any config value can be overridden
+```
+
+- Each run goes to `BUNDLE/runs/<name>_<time>/`: the usual ultralytics output plus a copy of the script, the config used, and `training_data.json` (settings, versions, GPU, timing, final metrics).
+- It stops with an error rather than silently training on CPU when CUDA is missing (`--allow-cpu` overrides).
+- Online loggers (wandb, comet, …) are switched off for the run, without touching ultralytics' global settings. Add `"loggers": ["wandb"]` to `train_config.json` to keep one.
+- It checks the bundle's `format_version`, and warns when the server's ultralytics version differs from the app's: a model trained with a newer ultralytics may not load in the app.
+- After the dialog exports a bundle, it shows the `scp` / `ssh` / `nohup` commands for that bundle (replace `HOST` with your SSH host).
+
 ## Classes (`classes.json`)
 
 ```json
@@ -107,7 +136,9 @@ imobj_labeler/
   reader.py       file → 2D array → RGB (channels, flatten, contrast, colormap)
   annotations.py  annotation dicts and YOLO txt I/O
   classes.py      classes.json schema
-  project.py      data folder + obj_det_labels output, registration, data.yaml
+  project.py      data folder + obj_det_labels output, registration, data.yaml, bundles
+  augment.py      offline augmentation (90° rotations, noise, blur) with exact boxes
+  train_yolo.py   standalone training script for bundles (copy to the GPU machine)
   predict.py      ultralytics model cache and inference
   server.py       FastAPI API and static UI
   web/            index.html, app.js (state/UI), canvas.js (viewer/box editor)

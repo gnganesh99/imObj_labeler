@@ -493,6 +493,94 @@ async function writeDataset() {
   } catch (e) { $("ds-msg").textContent = e.message; }
 }
 
+// ---------------------------------------------------------------- training bundle
+const TRAIN_FIELDS = { model: "tr-model", epochs: "tr-epochs", imgsz: "tr-imgsz", batch: "tr-batch",
+  patience: "tr-patience", save_period: "tr-save", device: "tr-device" };
+const STOCK_MODELS = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov10n.pt", "yolov10s.pt", "yolov10m.pt",
+  "yolo11n.pt", "yolo11s.pt", "yolo11m.pt"];
+
+const formatArgs = (o) => Object.entries(o || {}).map(([k, v]) => `${k}=${v}`).join(" ");
+function parseArgs(text) {
+  const out = {};
+  for (const tok of text.trim().split(/[\s,]+/).filter(Boolean)) {
+    const m = tok.match(/^([A-Za-z_]\w*)=(.*)$/);
+    if (!m) throw new Error(`YOLO args: "${tok}" is not key=value`);
+    const v = m[2];
+    out[m[1]] = /^(true|false)$/i.test(v) ? v.toLowerCase() === "true"
+      : v !== "" && !isNaN(Number(v)) ? Number(v) : v;
+  }
+  return out;
+}
+
+async function openTrainDialog() {
+  $("tr-msg").textContent = "";
+  $("tr-cmds").classList.add("hidden");
+  $("dlg-train").showModal();
+  try {
+    const b = await api("/api/bundle");
+    const saved = JSON.parse(recall("imobj.train") || "null") || {};
+    const cfg = { ...b.defaults, ...saved };
+    for (const [k, id] of Object.entries(TRAIN_FIELDS)) $(id).value = cfg[k] ?? "";
+    $("tr-args").value = formatArgs(cfg.args);
+    $("tr-name").value = b.suggested_name;
+    $("tr-dest").value = b.last_dest || b.default_dest;
+    $("tr-models").innerHTML = "";
+    const local = [...$("m-select").options].filter((o) => o.value).map((o) => o.value);
+    for (const m of [...STOCK_MODELS, ...local]) $("tr-models").append(new Option(m));
+    const s = b.split;
+    let t = `Exports ${b.n_train} train / ${b.n_val} val images`;
+    if (b.n_train_aug + b.n_val_aug) t += ` (incl. ${b.n_train_aug} / ${b.n_val_aug} augmented)`;
+    t += ` · images from ${s.source}, validation ${s.val_fraction}, seed ${s.seed}.`;
+    if (!b.is_split) t += " No validation split: train is also used as val (set one in Dataset…).";
+    if (b.n_aug_stale) t += ` ${b.n_aug_stale} out-of-date augmented copies are left out.`;
+    $("tr-summary").textContent = t;
+    $("tr-export").disabled = !b.n_train;
+    if (!b.n_train) $("tr-msg").textContent = "No labelled images yet: register some, or check the Dataset dialog's source.";
+    $("tr-export").dataset.script = b.script;
+  } catch (e) { $("tr-msg").textContent = e.message; }
+}
+
+async function exportBundle() {
+  const btn = $("tr-export");
+  let config;
+  try {
+    config = { args: parseArgs($("tr-args").value) };
+    for (const [k, id] of Object.entries(TRAIN_FIELDS)) {
+      const v = $(id).value.trim();
+      if (v === "") continue;
+      config[k] = ["model", "device"].includes(k) ? v : Number(v);
+    }
+  } catch (e) { $("tr-msg").textContent = e.message; return; }
+  store("imobj.train", JSON.stringify(config));
+  btn.disabled = true;
+  $("tr-msg").textContent = "Exporting…";
+  try {
+    const r = await api("/api/bundle", { json: { dest: $("tr-dest").value.trim(), name: $("tr-name").value.trim(), config } });
+    $("tr-msg").textContent = `Exported ${r.train} train / ${r.val || 0} val images to ${r.path}`;
+    const n = r.name, host = "HOST";
+    $("tr-cmds").textContent = [
+      `# once: copy the training script to the GPU machine (again after app updates)`,
+      `scp "${r.script}" ${host}:~/`,
+      `ssh ${host} mkdir -p ~/bundles`,
+      `# each bundle: copy it, check it, train detached`,
+      `scp -r "${r.path}" ${host}:~/bundles/`,
+      `ssh ${host}`,
+      `python ~/train_yolo.py ~/bundles/${n} --check`,
+      `nohup python ~/train_yolo.py ~/bundles/${n} > ~/bundles/${n}/train.log 2>&1 &`,
+      `tail -f ~/bundles/${n}/train.log      # watch; Ctrl+C stops watching, not training`,
+      `# afterwards, fetch the run (weights/best.pt, results.csv, plots)`,
+      `scp -r ${host}:~/bundles/${n}/runs "<local folder>"`,
+    ].join("\n");
+    $("tr-cmds").classList.remove("hidden");
+  } catch (e) { $("tr-msg").textContent = e.message; }
+  btn.disabled = false;
+}
+
+async function pickBundleDest() {
+  const p = await chooseFolder({ title: "Save bundle in", initial: $("tr-dest").value.trim(), purpose: "bundle" });
+  if (p) $("tr-dest").value = p;
+}
+
 // ---------------------------------------------------------------- prediction
 async function scanModels(folder) {
   const r = await api(`/api/models?${qs({ folder })}`);
@@ -622,7 +710,7 @@ const PLACE_ICON = { home: "🏠", desktop: "🖥️", documents: "📄", downlo
 async function inAppPicker({ title, initial, purpose }) {
   picker.purpose = purpose;
   $("fb-title").textContent = title;
-  $("fb-open").textContent = purpose === "models" ? "Use this models folder" : "Open this folder";
+  $("fb-open").textContent = purpose === "models" ? "Use this models folder" : purpose === "bundle" ? "Save here" : "Open this folder";
   try {
     renderPlaces(await api("/api/places"));
     await browse(initial || "");
@@ -711,6 +799,9 @@ async function browse(path) {
     if (picker.purpose === "models") {
       cnt.textContent = r.n_models ? `${r.n_models} .pt model(s) here` : "Subfolders are searched for .pt models";
       cnt.classList.toggle("has", r.n_models > 0);
+    } else if (picker.purpose === "bundle") {
+      cnt.textContent = "The bundle is created as a new subfolder here";
+      cnt.classList.remove("has");
     } else {
       cnt.textContent = r.n_files ? `${r.n_files} supported file(s) here` : "No supported files here";
       cnt.classList.toggle("has", r.n_files > 0);
@@ -836,6 +927,10 @@ function wire() {
   $("cls-cancel").onclick = () => $("dlg-classes").close();
   $("cls-save").onclick = saveClasses;
   $("btn-dataset").onclick = openDatasetDialog;
+  $("btn-train").onclick = openTrainDialog;
+  $("tr-close").onclick = () => $("dlg-train").close();
+  $("tr-export").onclick = exportBundle;
+  $("tr-browse").onclick = pickBundleDest;
   $("ds-close").onclick = () => $("dlg-dataset").close();
   $("ds-source").onchange = showDatasetCounts;
   $("ds-build").onclick = writeDataset;

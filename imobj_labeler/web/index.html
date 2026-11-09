@@ -21,6 +21,7 @@
   <div class="spacer"></div>
   <button id="btn-classes">Classes…</button>
   <button id="btn-dataset">Dataset…</button>
+  <button id="btn-train" title="Export a training bundle for a GPU machine">Train…</button>
   <button id="btn-help" title="Keyboard shortcuts">?</button>
 </header>
 
@@ -202,6 +203,33 @@
 
   <div id="ds-msg" class="small"></div>
   <div class="row"><span class="spacer"></span><button id="ds-close">Close</button></div>
+</dialog>
+
+<dialog id="dlg-train">
+  <h3>Export training bundle</h3>
+  <p class="muted small">Copies the current split (Dataset dialog), including augmented copies, into one folder
+    with images/train, images/val, labels/…, data.yaml and train_config.json. Copy it to the GPU machine and
+    train it there with the common <code>train_yolo.py</code>.</p>
+  <div id="tr-summary" class="small"></div>
+  <div class="grid2">
+    <label>Bundle name</label><input id="tr-name">
+    <label>Save in</label>
+    <div class="row"><input id="tr-dest" style="flex:1"><button id="tr-browse">Browse…</button></div>
+    <label>Start from</label>
+    <input id="tr-model" list="tr-models" title="A YOLO model name (downloaded on the GPU machine), or a local .pt file (copied into the bundle)">
+    <datalist id="tr-models"></datalist>
+    <label>Epochs</label><input id="tr-epochs" type="number" min="1">
+    <label>Image size</label><input id="tr-imgsz" type="number" min="32" step="32">
+    <label>Batch</label><input id="tr-batch" type="number" step="any" title="-1 = auto batch on the GPU">
+    <label>Patience</label><input id="tr-patience" type="number" min="0">
+    <label>Save period</label><input id="tr-save" type="number" title="Save a checkpoint every N epochs (-1 = off)">
+    <label>Device</label><input id="tr-device" title="0, 0,1 for two GPUs, or cpu">
+    <label>YOLO args</label>
+    <input id="tr-args" title="On-the-fly augmentation and any other model.train() argument, as key=value pairs">
+  </div>
+  <div id="tr-msg" class="small"></div>
+  <pre id="tr-cmds" class="cmds hidden"></pre>
+  <div class="row"><span class="spacer"></span><button id="tr-close">Close</button><button id="tr-export" class="primary">Export bundle</button></div>
 </dialog>
 
 <dialog id="dlg-help">
