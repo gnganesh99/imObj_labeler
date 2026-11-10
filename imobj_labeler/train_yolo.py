@@ -27,7 +27,7 @@ import shutil
 import sys
 from pathlib import Path
 
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.0.1"  # bump on every change (the app also compares a checksum)
 SUPPORTED_FORMATS = {1}  # bundle format_version values this script understands
 
 
@@ -199,12 +199,15 @@ def main(argv=None):
         model = YOLO(str(weights) if weights.is_file() else cfg["model"])
         print(f"Training {cfg['epochs']} epochs, imgsz {cfg['imgsz']}, batch {cfg['batch']}, "
               f"patience {cfg['patience']}, save_period {cfg['save_period']} -> {save_dir}")
-        model.train(data=str(data_yaml), epochs=int(cfg["epochs"]), imgsz=int(cfg["imgsz"]),
-                    batch=cfg["batch"], patience=int(cfg["patience"]),
-                    save_period=int(cfg["save_period"]), device=device,
-                    workers=int(cfg.get("workers", 8)), seed=int(cfg.get("seed", 0)),
-                    project=str(runs), name=run_name, exist_ok=True, verbose=True,
-                    **(cfg.get("args") or {}))
+        kwargs = dict(epochs=int(cfg["epochs"]), imgsz=int(cfg["imgsz"]), batch=cfg["batch"],
+                      patience=int(cfg["patience"]), save_period=int(cfg["save_period"]),
+                      workers=int(cfg.get("workers", 8)), seed=int(cfg.get("seed", 0)),
+                      verbose=True)
+        kwargs.update(cfg.get("args") or {})  # "YOLO args" win over the fields above
+        # these define where and how the run is written: never taken from args
+        kwargs.update(data=str(data_yaml), device=device, project=str(runs), name=run_name,
+                      exist_ok=True)
+        model.train(**kwargs)
 
     trainer = model.trainer
     save_dir = Path(trainer.save_dir)

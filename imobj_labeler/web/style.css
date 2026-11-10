@@ -152,3 +152,16 @@ dialog.picker { width: min(760px, 94vw); }
 .keys td { padding: 3px 10px 3px 0; vertical-align: top; }
 .keys td:first-child { color: var(--accent); white-space: nowrap; }
 section h3 select { text-transform: none; letter-spacing: 0; font-size: 12px; padding: 1px 4px; color: var(--text); }
+dialog details > summary { cursor: pointer; font-weight: 600; margin: 4px 0; }
+.runs { list-style: none; margin: 4px 0; padding: 0; max-height: 150px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+.runs:empty { display: none; }
+.runs li { display: flex; gap: 8px; align-items: center; padding: 4px 8px; cursor: pointer; font-size: 12px; }
+.runs li:hover, .runs li.active { background: var(--panel2); }
+.runs li .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runs li .st { font-size: 11px; color: var(--muted); }
+.runs li .st.running { color: var(--accent, #4f9dff); }
+.progress { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; margin: 6px 0; }
+.progress > div { height: 100%; width: 0; background: var(--accent, #4f9dff); transition: width .3s; }
+.spark { width: 100%; height: 60px; display: block; margin: 4px 0; }
+.spark polyline { fill: none; stroke: var(--accent, #4f9dff); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+#rn-log { max-height: 160px; }

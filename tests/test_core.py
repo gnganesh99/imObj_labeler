@@ -307,3 +307,81 @@ def test_train_script_checks_bundle(tmp_path):
     cfg.write_text(cfg.read_text().replace('"format_version": 1', '"format_version": 99'))
     r = run(str(tmp_path / "bundle"), "--check", "--allow-cpu")
     assert r.returncode == 2 and "not supported" in r.stderr
+
+
+def test_remote_quoting_and_sections():
+    from imobj_labeler import remote
+
+    assert remote.rq("~/bundles") == '"$HOME"/bundles'
+    assert remote.rq("~/my runs") == "\"$HOME\"/'my runs'"
+    assert remote.rq("/opt/x;rm -rf") == "'/opt/x;rm -rf'"
+    assert remote.sections("junk\n@@a\n1\n2\n@@b\n") == {"a": "1\n2\n", "b": ""}
+    for bad in ("-oProxyCommand=x", "a b", ""):
+        with pytest.raises(remote.RemoteError):
+            remote.Server(bad)
+    with pytest.raises(remote.RemoteError):
+        remote.check_name("../x")
+
+
+GIT_BASH = Path(r"C:\Program Files\Git\usr\bin\bash.exe")
+
+
+@pytest.fixture
+def fake_server(tmp_path, monkeypatch):
+    """A local bash pretending to be the GPU server (home = tmp_path/home)."""
+    import shutil, sys
+    from imobj_labeler import remote
+
+    bash = str(GIT_BASH) if GIT_BASH.is_file() else shutil.which("bash")
+    if not bash:
+        pytest.skip("bash not available")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("FAKE_SSH_HOME", home.as_posix())
+    monkeypatch.setenv("FAKE_SSH_BASH", bash)
+    monkeypatch.setattr(remote, "SSH_COMMAND", [sys.executable, str(Path(__file__).with_name("fake_ssh.py"))])
+    return remote.Server("gpuvm", "~/bundles", Path(sys.executable).as_posix()), home
+
+
+def test_remote_upload_check_status(tmp_path, fake_server):
+    pytest.importorskip("ultralytics")
+    from imobj_labeler import remote
+
+    srv, home = fake_server
+    p = _small_dataset(tmp_path)
+    p.write_data_yaml(0.34, seed=0, source="existing")
+    b = p.export_bundle(tmp_path / "out" / "b1", {"device": "cpu"})
+
+    info = remote.test(srv)
+    assert info["script_version"] is None and info["ultralytics"] and not info["root_exists"]
+    assert remote.ensure_script(srv).startswith("uploaded")
+    assert "already" in remote.ensure_script(srv)
+    assert (home / "bundles" / "train_yolo.py").read_bytes() == remote.SCRIPT.read_bytes()
+
+    up = remote.upload(srv, Path(b["path"]))
+    assert up["name"] == "b1" and (home / "bundles" / "b1" / "images" / "train").is_dir()
+    with pytest.raises(remote.RemoteError, match="already exists"):
+        remote.upload(srv, Path(b["path"]))
+    assert "OK" in remote.check(srv, "b1")
+    assert remote.list_bundles(srv) == [{"name": "b1", "state": "not started", "run": None,
+                                         "time": remote.list_bundles(srv)[0]["time"]}]
+    st = remote.status(srv, "b1")
+    assert st["state"] == "not started" and st["epochs"] == 300 and not st["running"]
+
+    # a finished run, as train_yolo.py leaves it: status parses results.csv
+    run = home / "bundles" / "b1" / "runs" / "train_x"
+    (run / "weights").mkdir(parents=True)
+    (run / "weights" / "best.pt").write_bytes(b"pt")
+    (run / "weights" / "epoch0.pt").write_bytes(b"pt")
+    (run / "results.csv").write_text(
+        "  epoch,  metrics/mAP50(B),  metrics/mAP50-95(B),  val/box_loss\n"
+        "      1,  0.5,  0.3,  1.2\n      2,  0.7,  0.45,  1.0\n      3,  0.6,  0.4,  1.1\n")
+    (run / "training_data.json").write_text('{"ok": true}')
+    st = remote.status(srv, "b1")
+    assert st["state"] == "finished" and st["epoch"] == 3 and st["best"]["epoch"] == 2
+    assert st["has_best"] and st["run"] == "train_x"
+    got = remote.fetch(srv, "b1", tmp_path / "models")
+    assert Path(got["best"]).is_file() and not (Path(got["path"]) / "weights" / "epoch0.pt").exists()
+
+    with pytest.raises(remote.RemoteError, match="Cannot connect"):
+        remote.test(remote.Server("unreachable"))

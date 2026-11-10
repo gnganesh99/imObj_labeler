@@ -514,8 +514,9 @@ function parseArgs(text) {
 
 async function openTrainDialog() {
   $("tr-msg").textContent = "";
-  $("tr-cmds").classList.add("hidden");
+  $("tr-cmds-box").classList.add("hidden");
   $("dlg-train").showModal();
+  loadServerSettings();
   try {
     const b = await api("/api/bundle");
     const saved = JSON.parse(recall("imobj.train") || "null") || {};
@@ -534,46 +535,203 @@ async function openTrainDialog() {
     if (!b.is_split) t += " No validation split: train is also used as val (set one in Dataset…).";
     if (b.n_aug_stale) t += ` ${b.n_aug_stale} out-of-date augmented copies are left out.`;
     $("tr-summary").textContent = t;
-    $("tr-export").disabled = !b.n_train;
+    $("tr-export").disabled = $("tr-send").disabled = !b.n_train;
     if (!b.n_train) $("tr-msg").textContent = "No labelled images yet: register some, or check the Dataset dialog's source.";
-    $("tr-export").dataset.script = b.script;
   } catch (e) { $("tr-msg").textContent = e.message; }
 }
 
+function trainConfig() {
+  const config = { args: parseArgs($("tr-args").value) };
+  for (const [k, id] of Object.entries(TRAIN_FIELDS)) {
+    const v = $(id).value.trim();
+    if (v === "") continue;
+    config[k] = ["model", "device"].includes(k) ? v : Number(v);
+  }
+  return config;
+}
+
 async function exportBundle() {
-  const btn = $("tr-export");
   let config;
-  try {
-    config = { args: parseArgs($("tr-args").value) };
-    for (const [k, id] of Object.entries(TRAIN_FIELDS)) {
-      const v = $(id).value.trim();
-      if (v === "") continue;
-      config[k] = ["model", "device"].includes(k) ? v : Number(v);
-    }
-  } catch (e) { $("tr-msg").textContent = e.message; return; }
+  try { config = trainConfig(); } catch (e) { $("tr-msg").textContent = e.message; return null; }
   store("imobj.train", JSON.stringify(config));
-  btn.disabled = true;
   $("tr-msg").textContent = "Exporting…";
   try {
     const r = await api("/api/bundle", { json: { dest: $("tr-dest").value.trim(), name: $("tr-name").value.trim(), config } });
     $("tr-msg").textContent = `Exported ${r.train} train / ${r.val || 0} val images to ${r.path}`;
-    const n = r.name, host = "HOST";
+    const n = r.name, host = S.server?.host || "HOST";
+    const root = S.server?.root || "~/bundles", py = S.server?.python || "python";
     $("tr-cmds").textContent = [
       `# once: copy the training script to the GPU machine (again after app updates)`,
-      `scp "${r.script}" ${host}:~/`,
-      `ssh ${host} mkdir -p ~/bundles`,
+      `ssh ${host} mkdir -p ${root}`,
+      `scp "${r.script}" ${host}:${root}/`,
       `# each bundle: copy it, check it, train detached`,
-      `scp -r "${r.path}" ${host}:~/bundles/`,
+      `scp -r "${r.path}" ${host}:${root}/`,
       `ssh ${host}`,
-      `python ~/train_yolo.py ~/bundles/${n} --check`,
-      `nohup python ~/train_yolo.py ~/bundles/${n} > ~/bundles/${n}/train.log 2>&1 &`,
-      `tail -f ~/bundles/${n}/train.log      # watch; Ctrl+C stops watching, not training`,
+      `${py} ${root}/train_yolo.py ${root}/${n} --check`,
+      `nohup ${py} ${root}/train_yolo.py ${root}/${n} >> ${root}/${n}/train.log 2>&1 &`,
+      `tail -f ${root}/${n}/train.log      # watch; Ctrl+C stops watching, not training`,
       `# afterwards, fetch the run (weights/best.pt, results.csv, plots)`,
-      `scp -r ${host}:~/bundles/${n}/runs "<local folder>"`,
+      `scp -r ${host}:${root}/${n}/runs "<local folder>"`,
     ].join("\n");
-    $("tr-cmds").classList.remove("hidden");
-  } catch (e) { $("tr-msg").textContent = e.message; }
-  btn.disabled = false;
+    $("tr-cmds-box").classList.remove("hidden");
+    return r;
+  } catch (e) { $("tr-msg").textContent = e.message; return null; }
+}
+
+async function withBusy(btns, fn) {
+  btns.forEach((b) => { b.disabled = true; });
+  try { return await fn(); } finally { btns.forEach((b) => { b.disabled = false; }); }
+}
+
+async function exportOnly() {
+  await withBusy([$("tr-export"), $("tr-send")], exportBundle);
+}
+
+async function exportAndSend() {
+  if (!S.server?.host) {
+    $("tr-server-box").open = true;
+    $("tr-msg").textContent = "Set up and test the server first.";
+    return;
+  }
+  await withBusy([$("tr-export"), $("tr-send")], async () => {
+    const r = await exportBundle();
+    if (!r) return;
+    $("tr-msg").textContent = `Exported to ${r.path}. Uploading to ${S.server.host} and checking… (large bundles take a while)`;
+    try {
+      const s = await api("/api/remote/send", { json: { path: r.path, start: true } });
+      $("tr-msg").textContent = s.steps.join(" · ");
+      await refreshRuns(s.name);
+    } catch (e) { $("tr-msg").textContent = e.message; }
+  });
+}
+
+// ---------------------------------------------------------------- training server + runs
+S.server = null;
+let runTimer = null;
+
+async function loadServerSettings() {
+  try {
+    const s = await api("/api/remote/settings");
+    S.server = s.host ? s : null;
+    $("rs-host").value = s.host || "";
+    $("rs-root").value = s.root || "~/bundles";
+    $("rs-python").value = s.python || "python3";
+    $("tr-server-sum").textContent = s.host ? `· ${s.host}:${s.root}` : "· not set up";
+    $("tr-server-box").open = !s.host;
+    if (s.host) refreshRuns();
+    else { $("rn-list").innerHTML = ""; $("rn-msg").textContent = "Set up the server to see its runs."; }
+  } catch (e) { $("rs-msg").textContent = e.message; }
+}
+
+async function testServer() {
+  const body = { host: $("rs-host").value.trim(), root: $("rs-root").value.trim(), python: $("rs-python").value.trim() };
+  $("rs-msg").textContent = `Connecting to ${body.host}…`;
+  await withBusy([$("rs-test")], async () => {
+    try {
+      const r = await api("/api/remote/test", { json: body });
+      S.server = body;
+      $("tr-server-sum").textContent = `· ${body.host}:${body.root}`;
+      const gpu = r.gpus?.length ? r.gpus.join(", ") : "no GPU";
+      let t = `Connected to ${r.host} · Python ${r.python || "?"} · torch ${r.torch || "–"} (CUDA ${r.cuda ? "yes" : "no"}) · ${gpu}`
+        + ` · ultralytics ${r.ultralytics || "–"}`;
+      t += r.script_version
+        ? (r.script_version === r.local_script_version ? ` · train_yolo.py ${r.script_version}` : ` · train_yolo.py ${r.script_version} (will be updated to ${r.local_script_version})`)
+        : " · train_yolo.py will be uploaded on first use";
+      if (r.problems.length) t += `\nProblems: ${r.problems.join("; ")}`;
+      $("rs-msg").textContent = t;
+      $("rs-msg").style.whiteSpace = "pre-wrap";
+      refreshRuns();
+    } catch (e) { $("rs-msg").textContent = e.message; }
+  });
+}
+
+async function refreshRuns(select) {
+  if (!S.server) return;
+  $("rn-msg").textContent = "Loading runs…";
+  try {
+    const r = await api("/api/remote/bundles");
+    const ul = $("rn-list");
+    ul.innerHTML = "";
+    $("rn-msg").textContent = r.bundles.length ? "" : `No bundles in ${S.server.root} yet.`;
+    for (const b of r.bundles) {
+      const li = document.createElement("li");
+      li.dataset.name = b.name;
+      li.innerHTML = `<span class="nm"></span><span class="st"></span>`;
+      li.querySelector(".nm").textContent = b.name;
+      li.querySelector(".st").textContent = b.state;
+      li.querySelector(".st").classList.toggle("running", b.state === "running");
+      li.onclick = () => showRun(b.name);
+      ul.appendChild(li);
+    }
+    const pick = select || $("rn-detail").dataset.name;
+    if (pick && r.bundles.some((b) => b.name === pick)) await showRun(pick);
+  } catch (e) { $("rn-msg").textContent = e.message; }
+}
+
+function drawSpark(hist) {
+  const svg = $("rn-chart");
+  const pts = hist.filter((h) => isFinite(h.map));
+  if (pts.length < 2) { svg.innerHTML = ""; return; }
+  const maxE = pts[pts.length - 1].epoch || 1, maxY = Math.max(...pts.map((p) => p.map), 1e-6);
+  const xy = pts.map((p) => `${(p.epoch / maxE) * 300},${58 - (p.map / maxY) * 54}`).join(" ");
+  svg.innerHTML = `<polyline points="${xy}"></polyline>`;
+}
+
+async function showRun(name) {
+  clearTimeout(runTimer);
+  document.querySelectorAll("#rn-list li").forEach((li) => li.classList.toggle("active", li.dataset.name === name));
+  const box = $("rn-detail");
+  box.dataset.name = name;
+  box.classList.remove("hidden");
+  $("rn-name").textContent = name;
+  try {
+    const s = await api(`/api/remote/status?${qs({ name })}`);
+    if (box.dataset.name !== name) return;  // another run was selected meanwhile
+    $("rn-state").textContent = s.state;
+    $("rn-state").className = "chip" + (s.state === "finished" ? " done" : s.state === "running" ? " dirty" : "");
+    const total = s.epochs || 0, done = s.history.length;
+    $("rn-bar").style.width = total ? `${Math.min(100, (100 * done) / total)}%` : "0";
+    const last = s.history[done - 1];
+    let m = total ? `Epoch ${done} / ${total}` : `Epoch ${done}`;
+    if (last) m += ` · mAP50 ${last.map50.toFixed(3)} · mAP50-95 ${last.map.toFixed(3)}`;
+    if (s.best) m += ` · best mAP50-95 ${s.best.map.toFixed(3)} (epoch ${s.best.epoch})`;
+    if (s.state === "finished" && done < total) m += " · stopped early (patience)";
+    if (s.state === "stopped") m += " · not running: see the log; resume continues from last.pt";
+    $("rn-metrics").textContent = m;
+    drawSpark(s.history);
+    $("rn-log").textContent = s.log || "(no log yet)";
+    $("rn-log").scrollTop = $("rn-log").scrollHeight;
+    $("rn-stop").classList.toggle("hidden", s.state !== "running");
+    $("rn-resume").classList.toggle("hidden", s.state !== "stopped");
+    $("rn-fetch").disabled = !s.has_best;
+    // check again in a minute while it runs and the dialog is open (one short ssh call)
+    if (s.state === "running") runTimer = setTimeout(() => { if ($("dlg-train").open && box.dataset.name === name) showRun(name); }, 60000);
+  } catch (e) { $("rn-metrics").textContent = e.message; }
+}
+
+async function stopRun() {
+  const name = $("rn-detail").dataset.name;
+  if (!confirm(`Stop training "${name}" on ${S.server.host}? last.pt is kept, so it can be resumed.`)) return;
+  try { await api("/api/remote/stop", { json: { name } }); } catch (e) { fail(e); }
+  setTimeout(() => refreshRuns(name), 2000);
+}
+
+async function resumeRun() {
+  const name = $("rn-detail").dataset.name;
+  try { await api("/api/remote/start", { json: { name, resume: true } }); } catch (e) { fail(e); }
+  setTimeout(() => refreshRuns(name), 2000);
+}
+
+async function fetchRun() {
+  const name = $("rn-detail").dataset.name;
+  await withBusy([$("rn-fetch")], async () => {
+    $("rn-metrics").textContent = "Downloading…";
+    try {
+      const r = await api("/api/remote/fetch", { json: { name } });
+      $("rn-metrics").textContent = `Downloaded ${r.mb} MB to ${r.path}` + (r.best ? " · best.pt is now in the models list" : "");
+      if (r.best) await scanModels(r.dest).catch(() => {});
+    } catch (e) { $("rn-metrics").textContent = e.message; }
+  });
 }
 
 async function pickBundleDest() {
@@ -929,7 +1087,13 @@ function wire() {
   $("btn-dataset").onclick = openDatasetDialog;
   $("btn-train").onclick = openTrainDialog;
   $("tr-close").onclick = () => $("dlg-train").close();
-  $("tr-export").onclick = exportBundle;
+  $("tr-export").onclick = exportOnly;
+  $("tr-send").onclick = exportAndSend;
+  $("rs-test").onclick = testServer;
+  $("rn-refresh").onclick = () => refreshRuns();
+  $("rn-stop").onclick = stopRun;
+  $("rn-resume").onclick = resumeRun;
+  $("rn-fetch").onclick = fetchRun;
   $("tr-browse").onclick = pickBundleDest;
   $("ds-close").onclick = () => $("dlg-dataset").close();
   $("ds-source").onchange = showDatasetCounts;

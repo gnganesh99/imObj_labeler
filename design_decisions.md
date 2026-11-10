@@ -90,7 +90,22 @@ The Dataset dialog can write saved augmented copies, created only when the user 
 
 ## 5. Training runs outside the app: data bundles plus one common train_yolo.py
 
-**Status:** step 1 implemented (as of 2026-11-09). Remote control from the app (upload, start, watch, fetch over SSH) and "import run" are planned.
+**Status:** steps 1 and 2 implemented (as of 2026-11-09): export, plus upload, start, watch, stop/resume and download over SSH. Step 2 was tested against a local stand-in server, not yet on the real VM. "Import run" (for runs started by hand) is planned.
+
+### In plain words
+
+- **Step 1 (export) only prepares a folder.** It doesn't train. **Train… → Export bundle** copies everything training needs into a new folder:
+  - `images/train`, `images/val`, `labels/train`, `labels/val`. Augmented copies sit next to the originals as `x__rot90.png`; there is no separate `aug/` folder.
+  - `data.yaml`, `train_config.json` (the settings), `manifest.json` (where every file came from), `val_aug.txt`, and `weights_init/` when starting from a local `.pt`.
+  - The original data and `obj_det_labels/` are not changed.
+- **Where it goes:** `<data folder>/obj_det_labels/bundles/<name>/` by default, or wherever Save in points. The last location is remembered. It stays on this PC until copied to the VM, e.g. with `scp`.
+- **Loggers:** online experiment trackers (wandb, Comet, ClearML, MLflow…) that upload metrics to a website when installed. `train_yolo.py` switches them off. Ultralytics' local logs stay on: `results.csv` (one line per epoch), `train.log` (the console output, via `nohup … > train.log`), `last.pt` / `best.pt` and the plots.
+- **Today the training is started by hand:** scp, ssh, nohup.
+- **Step 2 (implemented):** the app does the same over SSH:
+  1. Upload the bundle.
+  2. Start training detached, so it survives the app closing, the PC sleeping or the network dropping.
+  3. Only read `results.csv` and `train.log` to show progress. This never talks to the training process, so it can't slow or interrupt it.
+  4. Download `best.pt` and the run folder when it's done.
 
 - **Separate process:** training takes hours, so it runs as a separate process on the GPU machine. Closing or restarting the app never touches a run, and `--resume` continues from `last.pt` after an interruption.
 - **Bundles hold data and config, not code.** One versioned `imobj_labeler/train_yolo.py` trains any bundle. The bundle's `format_version` and the script's `SUPPORTED_FORMATS` must agree, and the script refuses mismatches. Each run copies the script and the config it used into the run folder, so every `best.pt` can be traced back to exactly what produced it.
@@ -98,3 +113,12 @@ The Dataset dialog can write saved augmented copies, created only when the user 
 - **No `path:` in the bundle's data.yaml:** ultralytics resolves a relative `path:` against its global datasets folder, not the yaml's folder. Without the key, it uses the yaml's own folder, provided the yaml is passed as an absolute path, which `train_yolo.py` does.
 - **No silent CPU fallback:** without CUDA the script stops instead of training for days on CPU.
 - **Online loggers off by default:** an installed wandb starts automatically, can wait for a login on a detached run, and rejects an absolute project folder. They are switched off in memory with `dict.__setitem__`, because `SETTINGS[...] = ...` would rewrite ultralytics' global settings file.
+
+### Step 2 details (SSH)
+
+- **System ssh only:** the app calls this PC's `ssh` with `BatchMode=yes`, so it uses the user's keys and `~/.ssh/config` and fails instead of prompting. No password is ever handled or stored, and no port forwarding or server software is needed. Host names are checked so they can't be read as ssh options, and remote paths are shell-quoted (a leading `~/` stays expandable).
+- **One folder on the server:** `<root>/train_yolo.py` and one subfolder per bundle. Each run is started with `nohup … < /dev/null &`, its PID is saved in `train.pid` and its output appended to `train.log`. The `;` before `nohup` matters: `a && b &` would background a subshell, and `$!` would be the wrong process.
+- **Progress is read-only:** each check is one short ssh call that reads `train.pid` (`kill -0`), `results.csv`, `training_data.json` and the tail of `train.log`. It never talks to the training process. Output sections are separated by `@@name` lines, each preceded by an `echo`, so a file without a final newline can't swallow the next marker.
+- **Script updates by checksum, not version:** a changed `train_yolo.py` with the same version number was not re-uploaded during testing. The app now compares `sha256sum` and uploads whenever the contents differ.
+- **Bundle files are written with LF line endings,** since they go to Linux.
+- **Testing:** `tests/fake_ssh.py` stands in for ssh (a local bash with its own home folder). `IMOBJ_SSH` (a JSON list) can point the app at it, or at another ssh client.

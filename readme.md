@@ -93,7 +93,23 @@ python train_yolo.py BUNDLE --epochs 5   # any config value can be overridden
 - It stops with an error rather than silently training on CPU when CUDA is missing (`--allow-cpu` overrides).
 - Online loggers (wandb, comet, …) are switched off for the run, without touching ultralytics' global settings. Add `"loggers": ["wandb"]` to `train_config.json` to keep one.
 - It checks the bundle's `format_version`, and warns when the server's ultralytics version differs from the app's: a model trained with a newer ultralytics may not load in the app.
-- After the dialog exports a bundle, it shows the `scp` / `ssh` / `nohup` commands for that bundle (replace `HOST` with your SSH host).
+- After the dialog exports a bundle, it shows the `scp` / `ssh` / `nohup` commands for that bundle, to do it by hand.
+
+### Training from the app (SSH)
+
+The **Train…** dialog can also run everything on the server for you. It uses this PC's own `ssh` with your keys and `~/.ssh/config`. Key-based login is required: the app never asks for or stores a password.
+
+1. **Server:** enter the host alias, a remote folder (default `~/bundles`) and the Python to use (e.g. your venv: `~/venvs/yolo/bin/python`), then click **Save & test connection**. It shows the GPU, torch/CUDA and ultralytics versions, and any problem.
+2. **Export & train on server:** exports the bundle, uploads `train_yolo.py` if the server's copy differs (checksum), uploads the bundle, runs `--check`, then starts training detached with `nohup`. The run carries on if the app closes, the PC sleeps or the network drops.
+3. **Runs on server:** lists the bundles on the server and their state (running / finished / stopped). Selecting one shows epoch x / y, mAP50 and mAP50-95 (latest and best), a mAP chart and the end of `train.log`. The view refreshes every minute while a run is training and the dialog is open, and only reads files the run writes anyway. **stop** ends a run (its `last.pt` is kept), and **resume** continues it.
+4. **Download results:** copies the run (weights, `results.csv`, plots; per-epoch checkpoints are skipped) into the models folder, where Prediction mode lists the new `best.pt`.
+
+On the server:
+
+```
+~/bundles/train_yolo.py
+~/bundles/<bundle>/train.pid, train.log, runs/<name>_<time>/...
+```
 
 ## Classes (`classes.json`)
 
@@ -139,6 +155,7 @@ imobj_labeler/
   project.py      data folder + obj_det_labels output, registration, data.yaml, bundles
   augment.py      offline augmentation (90° rotations, noise, blur) with exact boxes
   train_yolo.py   standalone training script for bundles (copy to the GPU machine)
+  remote.py       SSH: test server, upload, start detached, status, stop, download
   predict.py      ultralytics model cache and inference
   server.py       FastAPI API and static UI
   web/            index.html, app.js (state/UI), canvas.js (viewer/box editor)

@@ -206,10 +206,23 @@
 </dialog>
 
 <dialog id="dlg-train">
-  <h3>Export training bundle</h3>
+  <h3>Train</h3>
+
+  <details id="tr-server-box">
+    <summary>Server (SSH) <span id="tr-server-sum" class="muted small"></span></summary>
+    <p class="muted small">Uses this PC's ssh with your keys and ~/.ssh/config. The app never asks for or stores a password.</p>
+    <div class="grid2">
+      <label>Host</label><input id="rs-host" placeholder="alias from ~/.ssh/config, or user@host">
+      <label>Remote folder</label><input id="rs-root" title="Bundles, runs and train_yolo.py live here on the server">
+      <label>Python</label><input id="rs-python" title="Python with ultralytics + CUDA torch, e.g. ~/venvs/yolo/bin/python">
+    </div>
+    <div id="rs-msg" class="small"></div>
+    <div class="row"><span class="spacer"></span><button id="rs-test">Save &amp; test connection</button></div>
+  </details>
+
+  <h4 class="ds-sub">Export bundle</h4>
   <p class="muted small">Copies the current split (Dataset dialog), including augmented copies, into one folder
-    with images/train, images/val, labels/…, data.yaml and train_config.json. Copy it to the GPU machine and
-    train it there with the common <code>train_yolo.py</code>.</p>
+    with images/train, images/val, labels/…, data.yaml and train_config.json, trained by the common <code>train_yolo.py</code>.</p>
   <div id="tr-summary" class="small"></div>
   <div class="grid2">
     <label>Bundle name</label><input id="tr-name">
@@ -228,8 +241,28 @@
     <input id="tr-args" title="On-the-fly augmentation and any other model.train() argument, as key=value pairs">
   </div>
   <div id="tr-msg" class="small"></div>
-  <pre id="tr-cmds" class="cmds hidden"></pre>
-  <div class="row"><span class="spacer"></span><button id="tr-close">Close</button><button id="tr-export" class="primary">Export bundle</button></div>
+  <details id="tr-cmds-box" class="hidden"><summary class="small">Commands to do it by hand</summary><pre id="tr-cmds" class="cmds"></pre></details>
+  <div class="row"><span class="spacer"></span>
+    <button id="tr-export">Export only</button>
+    <button id="tr-send" class="primary" title="Export, upload to the server, check it and start training there (detached)">Export &amp; train on server</button></div>
+
+  <h4 class="ds-sub">Runs on server <button id="rn-refresh" class="link">refresh</button></h4>
+  <div id="rn-msg" class="muted small"></div>
+  <ul id="rn-list" class="runs"></ul>
+  <div id="rn-detail" class="hidden">
+    <div class="row"><b id="rn-name"></b><span class="spacer"></span><span id="rn-state" class="chip"></span></div>
+    <div class="progress"><div id="rn-bar"></div></div>
+    <div id="rn-metrics" class="small"></div>
+    <svg id="rn-chart" class="spark" viewBox="0 0 300 60" preserveAspectRatio="none" aria-label="mAP50-95 per epoch"></svg>
+    <pre id="rn-log" class="cmds"></pre>
+    <div class="row">
+      <button id="rn-stop" class="link danger">stop</button>
+      <button id="rn-resume" class="link">resume</button>
+      <span class="spacer"></span>
+      <button id="rn-fetch" class="primary" title="Download the run (best.pt, last.pt, results, plots) into the models folder">Download results</button></div>
+  </div>
+
+  <div class="row"><span class="spacer"></span><button id="tr-close">Close</button></div>
 </dialog>
 
 <dialog id="dlg-help">

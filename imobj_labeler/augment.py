@@ -39,7 +39,8 @@ def read_boxes(path: Path) -> list[tuple[int, float, float, float, float]]:
 
 def write_boxes(path: Path, rows) -> None:
     Path(path).write_text("".join(f"{c} {x:.6f} {y:.6f} {w:.6f} {h:.6f}\n"
-                                  for c, x, y, w, h in rows), encoding="utf-8")
+                                  for c, x, y, w, h in rows), encoding="utf-8",
+                          newline="\n")  # LF: bundles go to Linux
 
 
 def rotate_box(cx: float, cy: float, w: float, h: float, k: int):

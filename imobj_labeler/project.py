@@ -516,7 +516,8 @@ class Project:
                               "augmented": img in aug_set, "boxes": len(rows)})
         if val_aug:
             (dest / "val_aug.txt").write_text(
-                "".join(f"./{bundle_name[('val', p)]}\n" for p in val_aug), encoding="utf-8")
+                "".join(f"./{bundle_name[('val', p)]}\n" for p in val_aug), encoding="utf-8",
+                newline="\n")  # LF throughout: bundles go to Linux
 
         names = cls_cfg.names(self.classes())
         lines = [f"# imObj Labeler training bundle (format {BUNDLE_FORMAT}).",
@@ -527,8 +528,9 @@ class Project:
             lines.append("test: val_aug.txt  # augmented val copies alone: yolo val ... split=test")
         lines.append("names:")
         lines += [f"  {i}: {json.dumps(n)}" for i, n in sorted(names.items())]
-        (dest / "data.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        (dest / "train_config.json").write_text(json.dumps(tcfg, indent=2), encoding="utf-8")
+        (dest / "data.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        (dest / "train_config.json").write_text(json.dumps(tcfg, indent=2) + "\n",
+                                                 encoding="utf-8", newline="\n")
 
         counts = {"train": len(train), "val": len(val) if split else 0,
                   "train_aug": len(train_aug), "val_aug": len(val_aug),
@@ -540,7 +542,8 @@ class Project:
                                                              ("source", "val_fraction", "seed")},
                     "augmentation": cfg.get("aug"), "classes": names, "counts": counts,
                     "files": files}
-        (dest / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+        (dest / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n",
+                                             encoding="utf-8", newline="\n")
         return {"path": str(dest), "name": dest.name, **counts, "split": split,
                 "model": tcfg["model"]}
 

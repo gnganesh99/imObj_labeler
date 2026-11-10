@@ -357,6 +357,126 @@ def export_bundle(req: BundleReq):
     return {**res, "script": str(TRAIN_SCRIPT)}
 
 
+# ------------------------------------------------------------------ remote training (SSH)
+class ServerReq(BaseModel):
+    host: str
+    root: str = "~/bundles"
+    python: str = "python3"
+
+
+def _server():
+    from . import remote
+
+    cfg = State.settings.get("remote")
+    if not cfg or not cfg.get("host"):
+        raise HTTPException(400, "Set up the training server first (Train… → Server)")
+    try:
+        return remote.Server(**cfg)
+    except remote.RemoteError as e:
+        raise HTTPException(400, str(e))
+
+
+def _remote_call(fn, *args, **kw):
+    from . import remote
+
+    try:
+        return fn(*args, **kw)
+    except remote.RemoteError as e:
+        raise HTTPException(502, str(e))
+
+
+@app.get("/api/remote/settings")
+def remote_settings():
+    return State.settings.get("remote") or {"host": "", "root": "~/bundles", "python": "python3"}
+
+
+@app.post("/api/remote/test")
+def remote_test(req: ServerReq):
+    from . import remote
+
+    try:
+        srv = remote.Server(req.host, req.root, req.python)
+    except remote.RemoteError as e:
+        raise HTTPException(400, str(e))
+    State.save_settings(remote={"host": srv.host, "root": srv.root, "python": srv.python})
+    return _remote_call(remote.test, srv)
+
+
+@app.get("/api/remote/bundles")
+def remote_bundles():
+    from . import remote
+
+    return {"bundles": _remote_call(remote.list_bundles, _server())}
+
+
+class SendReq(BaseModel):
+    path: str            # local bundle folder
+    start: bool = True
+
+
+@app.post("/api/remote/send")
+def remote_send(req: SendReq):
+    """Upload the script (if needed) and the bundle, run --check, then start training."""
+    from . import remote
+
+    srv = _server()
+    steps = [_remote_call(remote.ensure_script, srv)]
+    up = _remote_call(remote.upload, srv, Path(req.path))
+    steps.append(f"uploaded {up['files']} files ({up['mb']} MB) to {up['remote']}")
+    _remote_call(remote.check, srv, up["name"])
+    steps.append("train_yolo.py --check passed")
+    res = {"name": up["name"], "steps": steps}
+    if req.start:
+        st = _remote_call(remote.start, srv, up["name"])
+        steps.append(f"training started (pid {st['pid']})")
+        res["pid"] = st["pid"]
+    return res
+
+
+class RunReq(BaseModel):
+    name: str
+    resume: bool = False
+
+
+@app.get("/api/remote/status")
+def remote_status(name: str):
+    from . import remote
+
+    return _remote_call(remote.status, _server(), name)
+
+
+@app.post("/api/remote/start")
+def remote_start(req: RunReq):
+    from . import remote
+
+    return _remote_call(remote.start, _server(), req.name, req.resume)
+
+
+@app.post("/api/remote/stop")
+def remote_stop(req: RunReq):
+    from . import remote
+
+    return _remote_call(remote.stop, _server(), req.name)
+
+
+class FetchReq(BaseModel):
+    name: str
+    run: str | None = None
+    dest: str = ""          # default: the models folder (so Prediction mode finds best.pt)
+    checkpoints: bool = False
+
+
+@app.post("/api/remote/fetch")
+def remote_fetch(req: FetchReq):
+    from . import remote
+
+    dest = req.dest or State.settings.get("models_folder") or ""
+    if not dest:
+        dest = str(proj().out / "trained_models")
+    res = _remote_call(remote.fetch, _server(), req.name, Path(dest), req.run, req.checkpoints)
+    return {**res, "dest": dest}
+
+
 # ------------------------------------------------------------------ prediction
 @app.get("/api/models")
 def models(folder: str = ""):
