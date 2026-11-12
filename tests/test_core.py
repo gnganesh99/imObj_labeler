@@ -431,3 +431,22 @@ def test_evaluate_model_records_history(tmp_path):
     r = p.evaluate_model(str(MODEL68), "all")
     assert r["n_images"] == 4 and 0 <= r["map"] <= 1 and r["imgsz"] == 256
     assert p.eval_history()[-1]["model"] == str(MODEL68)
+
+
+def test_clean_log_collapses_progress_bars():
+    from imobj_labeler.remote import clean_log
+
+    raw = ("\x1b[1mEpoch    GPU_mem\x1b[0m\n"
+           "  0%|          | 0/6 [00:00<?, ?it/s]\n"
+           "        1/4  0G  1.4  256:  17%|#6        | 1/6 [00:01]\n"
+           "        1/4  0G  1.3  256:  67%|######6   | 4/6 [00:03]\r        1/4  0G  1.3  256: 100%|##########| 6/6 [00:04]\n"
+           "       Class  Images:   0%|          | 0/2\n"
+           "       Class  Images: 100%|##########| 2/2\n"
+           "         all   9  180  0.06\n"
+           "        2/4  0G  1.5  256:  50%|#####     | 3/6 [00:02]\n")
+    assert clean_log(raw).split("\n") == [
+        "Epoch    GPU_mem",
+        "        1/4  0G  1.3  256: 100%|##########| 6/6 [00:04]",
+        "       Class  Images: 100%|##########| 2/2",
+        "         all   9  180  0.06",
+        "        2/4  0G  1.5  256:  50%|#####     | 3/6 [00:02]"]

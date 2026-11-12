@@ -121,6 +121,7 @@ The Dataset dialog can write saved augmented copies, created only when the user 
 - **Progress is read-only:** each check is one short ssh call that reads `train.pid` (`kill -0`), `results.csv`, `training_data.json` and the tail of `train.log`. It never talks to the training process. Output sections are separated by `@@name` lines, each preceded by an `echo`, so a file without a final newline can't swallow the next marker.
 - **Script updates by checksum, not version:** a changed `train_yolo.py` with the same version number was not re-uploaded during testing. The app now compares `sha256sum` and uploads whenever the contents differ.
 - **Bundle files are written with LF line endings,** since they go to Linux.
+- **Readable log view:** `train.log` comes from a file, so tqdm writes every progress-bar update as its own line. The app shows each bar once, at its latest state (consecutive updates of the same epoch or validation bar are collapsed), and strips colour codes. The file on the server is unchanged. A restart begins the `=== start` marker on a new line, even after a run was stopped mid-bar.
 - **Testing:** `tests/fake_ssh.py` stands in for ssh (a local bash with its own home folder). `IMOBJ_SSH` (a JSON list) can point the app at it, or at another ssh client.
 
 ---

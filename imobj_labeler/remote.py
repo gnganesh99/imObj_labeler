@@ -147,11 +147,34 @@ def test(srv: Server) -> dict:
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
+_BAR = re.compile(r"(\d{1,3})%\|")  # tqdm progress bar: " 67%|######6   | 4/6 [...]"
+
+
 def clean_log(text: str) -> str:
-    """Console log as it looked on screen: no colour codes, progress bars at their last state."""
-    lines = [_ANSI.sub("", line.split("\r")[-1] if line.strip("\r") else "")
+    """Console log as it looked on screen: no colour codes, each progress bar at its last state.
+
+    Written to a file, tqdm puts every update of a bar on its own line (or after a \\r).
+    Consecutive updates of the same bar (same first word, e.g. the epoch "2/300" or "Class",
+    and a percentage that doesn't go back) are collapsed into the latest one."""
+    lines = [_ANSI.sub("", line.split("\r")[-1] if line.strip("\r") else "").rstrip()
              for line in text.replace("\r\n", "\n").split("\n")]
-    return "\n".join(line.rstrip() for line in lines).strip("\n")
+    out: list[str] = []
+    prev_key, prev_pct = None, -1
+    for line in lines:
+        m = _BAR.search(line)
+        if m:
+            # a bar printed before its first update has no label ("  0%|   | 0/6"): key ""
+            key = "" if line.lstrip().startswith(m.group(0)) else line.split(maxsplit=1)[0]
+            pct = int(m.group(1))
+            if out and prev_key is not None and (prev_key == "" or (key == prev_key and pct >= prev_pct)):
+                out[-1] = line  # same bar, further along: replace
+            else:
+                out.append(line)
+            prev_key, prev_pct = key, pct
+        else:
+            out.append(line)
+            prev_key, prev_pct = None, -1
+    return "\n".join(out).strip("\n")
 
 
 def sections(text: str) -> dict[str, str]:
@@ -232,7 +255,9 @@ def start(srv: Server, name: str, resume: bool = False, extra: list[str] | None 
         raise RemoteError(f"{name} is already training on the server")
     args = " ".join(shlex.quote(a) for a in (["--resume"] if resume else []) + (extra or []))
     # ';' not '&&' before nohup: "a && b &" would background a subshell, and $! would be its pid
-    cmd = (f"cd {d} || exit 1; echo \"=== $(date '+%Y-%m-%d %H:%M:%S') start {args}\" >> train.log; "
+    # leading echo: a stopped run can leave its last progress bar without a newline
+    cmd = (f"cd {d} || exit 1; [ -s train.log ] && echo >> train.log; "
+           f"echo \"=== $(date '+%Y-%m-%d %H:%M:%S') start {args}\" >> train.log; "
            f"nohup {srv.py} {srv.script} \"$PWD\" {args} >> train.log 2>&1 < /dev/null & "
            "echo $! > train.pid; cat train.pid")
     pid = out(ssh(srv, cmd)).strip()
