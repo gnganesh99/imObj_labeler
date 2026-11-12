@@ -122,3 +122,30 @@ The Dataset dialog can write saved augmented copies, created only when the user 
 - **Script updates by checksum, not version:** a changed `train_yolo.py` with the same version number was not re-uploaded during testing. The app now compares `sha256sum` and uploads whenever the contents differ.
 - **Bundle files are written with LF line endings,** since they go to Linux.
 - **Testing:** `tests/fake_ssh.py` stands in for ssh (a local bash with its own home folder). `IMOBJ_SSH` (a JSON list) can point the app at it, or at another ssh client.
+
+---
+
+## 6. Settled small items
+
+**Status:** decided (as of 2026-11-10)
+
+- **No automatic re-prediction when display settings change.** Changing the colormap, flatten or contrast doesn't re-run the model. Prediction runs only on request: Predict, or auto-predict when a new, unlabelled file is opened in Prediction mode. This is deliberate: the user predicts explicitly after choosing the display.
+- **The native Windows folder dialog works.** The user confirmed it (tkinter `askdirectory` on the machine running the app). The in-app picker remains the fallback for remote or headless servers and for `--no-native-dialog`.
+
+---
+
+## 7. Testing models: local evaluation on sets from the current split
+
+**Status:** implemented (as of 2026-11-10)
+
+- **Where:** models are tested in the app, on this PC, with ultralytics `model.val` on CPU. That's fast enough for a few hundred images (about 5 s per set for a YOLOv10s at 256 px). It needs no GPU or server, and it tests the downloaded `best.pt` in the same ultralytics version that Prediction mode uses, which also confirms that a server-trained model loads in the app.
+- **Sets** come from the current split (Dataset…):
+  - clean val, the honest score;
+  - augmented val copies only, for robustness;
+  - clean train, to compare against val for over-fitting;
+  - all labelled images.
+
+  Augmented copies are kept out of the clean sets, so the "clean val" number can be compared across augmentation settings.
+- **Image size:** each model is evaluated at its own training image size, read from its checkpoint.
+- **History:** results are appended to `obj_det_labels/evaluations.json`, together with the split and augmentation settings in force. Numbers measured on different splits can therefore be told apart.
+- **Training summary:** read from the run folder around each model (`args.yaml`, `results.csv`, and `training_data.json` when trained with `train_yolo.py`). It works for older runs too. A different ultralytics major.minor version than the app's is flagged.

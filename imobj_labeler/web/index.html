@@ -22,6 +22,7 @@
   <button id="btn-classes">Classes…</button>
   <button id="btn-dataset">Dataset…</button>
   <button id="btn-train" title="Export a training bundle for a GPU machine">Train…</button>
+  <button id="btn-models" title="Compare trained models and test them on the dataset">Models…</button>
   <button id="btn-help" title="Keyboard shortcuts">?</button>
 </header>
 
@@ -263,6 +264,31 @@
   </div>
 
   <div class="row"><span class="spacer"></span><button id="tr-close">Close</button></div>
+</dialog>
+
+<dialog id="dlg-models" class="wide">
+  <h3>Models</h3>
+  <p class="muted small">Models in <span id="md-folder"></span>. Training values come from each model's run folder
+    (results.csv, args.yaml, training_data.json). Tick models to test them on the current dataset.</p>
+  <div class="table-wrap"><table class="grid" id="md-table">
+    <thead><tr><th></th><th>Model</th><th>Trained</th><th>Epochs</th><th>imgsz</th>
+      <th title="Best mAP50-95 on its own validation set during training">Train-time best mAP50-95</th><th></th></tr></thead>
+    <tbody></tbody></table></div>
+  <div id="md-msg" class="small"></div>
+
+  <h4 class="ds-sub">Test on this dataset</h4>
+  <p class="muted small">Runs YOLO validation here on this PC (CPU) with each model's own image size. Sets come from the
+    current split in Dataset…: <b>clean val</b> is the honest score, <b>augmented val</b> shows robustness
+    (e.g. to noise), and <b>train</b> next to val reveals over-fitting.</p>
+  <div id="md-sets" class="row"></div>
+  <div class="row"><span class="spacer"></span><button id="md-run" class="primary">Test selected models</button></div>
+
+  <h4 class="ds-sub">Results <span class="muted small">(latest first, saved in obj_det_labels/evaluations.json)</span></h4>
+  <div class="table-wrap"><table class="grid" id="md-results">
+    <thead><tr><th>When</th><th>Model</th><th>Set</th><th>Images</th><th>Precision</th><th>Recall</th>
+      <th>mAP50</th><th>mAP50-95</th></tr></thead>
+    <tbody></tbody></table></div>
+  <div class="row"><span class="spacer"></span><button id="md-close">Close</button></div>
 </dialog>
 
 <dialog id="dlg-help">

@@ -548,6 +548,70 @@ class Project:
                 "model": tcfg["model"]}
 
 
+    # ------------------------------------------------------------ model evaluation
+    @property
+    def eval_dir(self) -> Path:
+        return self.out / "eval"
+
+    @property
+    def eval_history_path(self) -> Path:
+        return self.out / "evaluations.json"
+
+    def eval_sets(self) -> dict[str, list[Path]]:
+        """Image lists for testing models, from the current saved split + augmentation."""
+        cfg = self.split_settings()
+        groups, _, keys, val_keys, split = self._split(cfg)
+        train_aug, val_aug, _ = self._aug_entries({**cfg, "aug": {"train": True, "val": True}},
+                                                  groups, val_keys)
+        clean_val = [img for k in keys if k in val_keys for img in groups[k]]
+        clean_train = [img for k in keys if k not in val_keys for img in groups[k]]
+        sets = {"all": clean_train + clean_val}
+        if split:
+            sets.update(val=clean_val, train=clean_train)
+        if val_aug:
+            sets["val_aug"] = val_aug
+        return sets
+
+    def eval_yaml(self, set_name: str) -> tuple[Path, int]:
+        """Write eval/<set>.txt + eval/<set>.yaml (absolute paths) for ``model.val``."""
+        sets = self.eval_sets()
+        if set_name not in sets or not sets[set_name]:
+            raise ValueError(f"No images in set {set_name!r} (available: {sorted(sets)})")
+        self.eval_dir.mkdir(parents=True, exist_ok=True)
+        lst = self.eval_dir / f"{set_name}.txt"
+        lst.write_text("".join(p.as_posix() + "\n" for p in sets[set_name]), encoding="utf-8")
+        names = cls_cfg.names(self.classes())
+        y = self.eval_dir / f"{set_name}.yaml"
+        y.write_text("\n".join([f"path: {json.dumps(self.eval_dir.as_posix())}",
+                                f"train: {lst.name}", f"val: {lst.name}", "names:"]
+                               + [f"  {i}: {json.dumps(n)}" for i, n in sorted(names.items())])
+                     + "\n", encoding="utf-8")
+        return y, len(sets[set_name])
+
+    def evaluate_model(self, model_path: str, set_name: str, imgsz: int | None = None,
+                       device: str = "cpu") -> dict:
+        """Evaluate one model on one set and append the result to evaluations.json."""
+        from . import evaluate as ev
+
+        y, n = self.eval_yaml(set_name)
+        res = ev.evaluate(model_path, y, imgsz, device, out_dir=self.eval_dir / "runs")
+        cfg = self.split_settings()
+        rec = {"time": datetime.now().isoformat(timespec="seconds"), "model": str(model_path),
+               "set": set_name, "n_images": n, **res,
+               "split": {k: cfg[k] for k in ("source", "val_fraction", "seed")},
+               "augmentation": cfg.get("aug")}
+        hist = self.eval_history()
+        hist.append(rec)
+        self.eval_history_path.write_text(json.dumps(hist[-500:], indent=1), encoding="utf-8")
+        return rec
+
+    def eval_history(self) -> list[dict]:
+        try:
+            return json.loads(self.eval_history_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+
+
 def _pkg_version(name: str) -> str | None:
     try:
         from importlib.metadata import version

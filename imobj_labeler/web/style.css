@@ -165,3 +165,14 @@ dialog details > summary { cursor: pointer; font-weight: 600; margin: 4px 0; }
 .spark { width: 100%; height: 60px; display: block; margin: 4px 0; }
 .spark polyline { fill: none; stroke: var(--accent, #4f9dff); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 #rn-log { max-height: 160px; }
+dialog.wide { width: min(980px, 96vw); }
+.table-wrap { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; margin: 6px 0; }
+table.grid { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.grid th, table.grid td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.grid th { position: sticky; top: 0; background: var(--panel2); font-weight: 600; }
+table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.grid td.best { font-weight: 700; color: var(--accent); }
+table.grid td.name { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+table.grid tr.new td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+table.grid .warn { color: #e0a030; }
+#md-sets label { margin-right: 14px; }

@@ -357,6 +357,60 @@ def export_bundle(req: BundleReq):
     return {**res, "script": str(TRAIN_SCRIPT)}
 
 
+# ------------------------------------------------------------------ testing models
+@app.get("/api/models/details")
+def models_details(folder: str = ""):
+    """Models in the models folder with what is known about their training run."""
+    from . import evaluate as ev
+    from .predict import find_models
+    from .project import _pkg_version
+
+    folder = folder or State.settings.get("models_folder", "")
+    out = []
+    for m in (find_models(folder) if folder else []):
+        try:
+            out.append({**ev.run_info(m["path"]), "name": m["name"]})
+        except OSError:
+            continue
+    return {"folder": folder, "models": out, "app_ultralytics": _pkg_version("ultralytics")}
+
+
+@app.get("/api/eval/sets")
+def eval_sets():
+    from . import evaluate as ev
+
+    sets = proj().eval_sets()
+    return {"sets": [{"name": k, "label": ev.EVAL_SETS[k], "n": len(sets[k])}
+                     for k in ev.EVAL_SETS if k in sets]}
+
+
+class EvalReq(BaseModel):
+    models: list[str]
+    sets: list[str]
+    device: str = "cpu"
+
+
+@app.post("/api/evaluate")
+def run_evaluate(req: EvalReq):
+    """Evaluate every chosen model on every chosen set (runs model.val locally)."""
+    p = proj()
+    if not req.models or not req.sets:
+        raise HTTPException(400, "Choose at least one model and one image set")
+    results, errors = [], []
+    for m in req.models:
+        for s in req.sets:
+            try:
+                results.append(p.evaluate_model(m, s, device=req.device))
+            except Exception as e:  # one bad model shouldn't stop the others
+                errors.append(f"{Path(m).parent.parent.name or m} on {s}: {type(e).__name__}: {e}")
+    return {"results": results, "errors": errors}
+
+
+@app.get("/api/evaluations")
+def evaluations():
+    return {"history": proj().eval_history()[::-1]}
+
+
 # ------------------------------------------------------------------ remote training (SSH)
 class ServerReq(BaseModel):
     host: str

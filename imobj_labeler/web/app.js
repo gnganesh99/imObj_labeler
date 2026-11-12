@@ -739,6 +739,138 @@ async function pickBundleDest() {
   if (p) $("tr-dest").value = p;
 }
 
+// ---------------------------------------------------------------- testing models
+const fmt3 = (x) => (x == null || !isFinite(x) ? "–" : x.toFixed(3));
+const modelLabel = (path, name) => {
+  const parts = (name || path).replace(/\\/g, "/").split("/");
+  const i = parts.lastIndexOf("weights");
+  return i > 0 ? `${parts[i - 1]} · ${parts.slice(i + 1).join("/")}` : parts.slice(-2).join("/");
+};
+let mdModels = [];
+
+async function openModelsDialog() {
+  $("md-msg").textContent = "";
+  $("dlg-models").showModal();
+  await Promise.all([loadModelDetails(), loadEvalSets(), loadEvalHistory()]);
+}
+
+async function loadModelDetails() {
+  const tb = $("md-table").querySelector("tbody");
+  tb.innerHTML = "";
+  try {
+    const r = await api("/api/models/details");
+    mdModels = r.models;
+    $("md-folder").textContent = r.folder || "(no models folder set: use Browse… in the Prediction panel)";
+    const ticked = JSON.parse(recall("imobj.evalModels") || "[]");
+    for (const m of r.models) {
+      const tr = document.createElement("tr");
+      const trained = (m.trained_end || m.modified || "").replace("T", " ").slice(0, 16);
+      const ep = m.epochs ? `${m.epochs_done ?? "?"} / ${m.epochs}` : "–";
+      const best = m.best ? `${fmt3(m.best.map)} (ep ${m.best.epoch})` : "–";
+      tr.innerHTML = `<td><input type="checkbox"></td><td class="name"></td><td></td><td class="num"></td>
+        <td class="num"></td><td class="num"></td><td><button class="link">use in Prediction</button></td>`;
+      const c = tr.children;
+      c[0].firstChild.checked = ticked.includes(m.path);
+      c[0].firstChild.dataset.path = m.path;
+      c[1].textContent = modelLabel(m.path, m.name);
+      c[1].title = [m.path, m.start_model && `started from ${m.start_model}`, m.bundle && `bundle ${m.bundle}`,
+        m.gpu && `GPU ${m.gpu}`, m.ultralytics && `ultralytics ${m.ultralytics}`].filter(Boolean).join("\n");
+      if (m.ultralytics && r.app_ultralytics && m.ultralytics.split(".").slice(0, 2).join(".") !== r.app_ultralytics.split(".").slice(0, 2).join(".")) {
+        c[1].insertAdjacentHTML("beforeend", ` <span class="warn" title="Trained with ultralytics ${m.ultralytics}; this app has ${r.app_ultralytics}">⚠</span>`);
+      }
+      c[2].textContent = trained;
+      c[3].textContent = ep;
+      c[4].textContent = m.imgsz ?? "–";
+      c[5].textContent = best;
+      c[6].firstChild.onclick = () => useModelInPrediction(m.path);
+      tb.appendChild(tr);
+    }
+    if (!r.models.length) $("md-msg").textContent = "No .pt models in the models folder yet. Download a run in Train… → Runs on server, or set the folder in the Prediction panel.";
+  } catch (e) { $("md-msg").textContent = e.message; }
+}
+
+async function loadEvalSets() {
+  const box = $("md-sets");
+  box.innerHTML = "";
+  try {
+    const r = await api("/api/eval/sets");
+    const ticked = JSON.parse(recall("imobj.evalSets") || '["val","val_aug"]');
+    for (const s of r.sets) {
+      const l = document.createElement("label");
+      l.className = "toggle";
+      l.innerHTML = `<input type="checkbox"> <span></span>`;
+      l.firstChild.dataset.set = s.name;
+      l.firstChild.checked = ticked.includes(s.name);
+      l.lastChild.textContent = `${s.label} (${s.n})`;
+      box.appendChild(l);
+    }
+    if (!r.sets.length) box.textContent = "No labelled images in this dataset.";
+  } catch (e) { box.textContent = e.message; }
+}
+
+function renderEvalRows(rows, fresh = 0) {
+  const tb = $("md-results").querySelector("tbody");
+  tb.innerHTML = "";
+  // best mAP50-95 per set among the shown rows
+  const best = {};
+  for (const r of rows) best[r.set] = Math.max(best[r.set] ?? -1, r.map);
+  rows.forEach((r, i) => {
+    const tr = document.createElement("tr");
+    if (i < fresh) tr.className = "new";
+    tr.innerHTML = `<td></td><td class="name"></td><td></td><td class="num"></td><td class="num"></td>
+      <td class="num"></td><td class="num"></td><td class="num"></td>`;
+    const c = tr.children;
+    c[0].textContent = r.time.replace("T", " ").slice(0, 16);
+    c[1].textContent = modelLabel(r.model);
+    c[1].title = r.model;
+    c[2].textContent = r.set;
+    c[2].title = `images from ${r.split?.source}, validation ${r.split?.val_fraction}, seed ${r.split?.seed}` +
+      (r.augmentation ? `\naugmentation: ${r.augmentation.transforms.join(", ")}` : "");
+    c[3].textContent = r.n_images;
+    c[4].textContent = fmt3(r.precision);
+    c[5].textContent = fmt3(r.recall);
+    c[6].textContent = fmt3(r.map50);
+    c[7].textContent = fmt3(r.map);
+    if (r.map === best[r.set] && rows.filter((x) => x.set === r.set).length > 1) c[7].classList.add("best");
+    tb.appendChild(tr);
+  });
+  if (!rows.length) tb.innerHTML = `<tr><td colspan="8" class="muted">No tests yet.</td></tr>`;
+}
+
+async function loadEvalHistory(fresh = 0) {
+  try {
+    const r = await api("/api/evaluations");
+    renderEvalRows(r.history, fresh);
+  } catch (e) { $("md-msg").textContent = e.message; }
+}
+
+async function runEvaluation() {
+  const models = [...document.querySelectorAll("#md-table input:checked")].map((c) => c.dataset.path);
+  const sets = [...document.querySelectorAll("#md-sets input:checked")].map((c) => c.dataset.set);
+  store("imobj.evalModels", JSON.stringify(models));
+  store("imobj.evalSets", JSON.stringify(sets));
+  if (!models.length || !sets.length) { $("md-msg").textContent = "Tick at least one model and one image set."; return; }
+  await withBusy([$("md-run")], async () => {
+    $("md-msg").textContent = `Testing ${models.length} model(s) on ${sets.join(", ")}… (about 1–30 s per model and set on CPU)`;
+    try {
+      const r = await api("/api/evaluate", { json: { models, sets } });
+      $("md-msg").textContent = `Done: ${r.results.length} result(s).` + (r.errors.length ? ` Failed: ${r.errors.join(" | ")}` : "");
+      await loadEvalHistory(r.results.length);
+    } catch (e) { $("md-msg").textContent = e.message; }
+  });
+}
+
+async function useModelInPrediction(path) {
+  $("dlg-models").close();
+  if (S.mode !== "predict") await setMode("predict");
+  const sel = $("m-select");
+  if (![...sel.options].some((o) => o.value === path)) sel.add(new Option(modelLabel(path), path));
+  sel.value = path;
+  store("imobj.model", path);
+  await selectModel();
+  msg(`Prediction model: ${modelLabel(path)}`, "ok");
+}
+
 // ---------------------------------------------------------------- prediction
 async function scanModels(folder) {
   const r = await api(`/api/models?${qs({ folder })}`);
@@ -1086,6 +1218,9 @@ function wire() {
   $("cls-save").onclick = saveClasses;
   $("btn-dataset").onclick = openDatasetDialog;
   $("btn-train").onclick = openTrainDialog;
+  $("btn-models").onclick = openModelsDialog;
+  $("md-close").onclick = () => $("dlg-models").close();
+  $("md-run").onclick = runEvaluation;
   $("tr-close").onclick = () => $("dlg-train").close();
   $("tr-export").onclick = exportOnly;
   $("tr-send").onclick = exportAndSend;

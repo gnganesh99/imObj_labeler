@@ -111,6 +111,21 @@ On the server:
 ~/bundles/<bundle>/train.pid, train.log, runs/<name>_<time>/...
 ```
 
+## Testing models (Models…)
+
+**Models…** lists the `.pt` files in the models folder (where **Download results** puts them). For each model it shows what its run folder records: when it was trained, epochs done / planned, image size, and the best mAP50-95 during training. Hovering over a name shows the starting model, bundle, GPU and ultralytics version; ⚠ marks a model trained with a different ultralytics version than the app's.
+
+Tick models and image sets, then **Test selected models**. This runs YOLO validation here, on CPU, at each model's own image size, on sets built from the current split in **Dataset…**:
+
+| Set | Images | Tells you |
+|---|---|---|
+| Validation (clean) | val images, no augmented copies | the honest score |
+| Validation, augmented copies | only the augmented val copies (e.g. noisy) | robustness |
+| Training (clean) | train images, no copies | compared with val: over-fitting |
+| All labelled images | everything (also without a split) | a quick check |
+
+Results (precision, recall, mAP50, mAP50-95) are added to a table, with the best mAP50-95 per set in bold. They are kept in `obj_det_labels/evaluations.json` together with the split and augmentation settings used. **use in Prediction** switches to Prediction mode with that model selected. Validation writes its lists to `obj_det_labels/eval/`. Ultralytics also saves a `labels.cache` next to each labels folder it reads.
+
 ## Classes (`classes.json`)
 
 ```json
@@ -156,6 +171,7 @@ imobj_labeler/
   augment.py      offline augmentation (90° rotations, noise, blur) with exact boxes
   train_yolo.py   standalone training script for bundles (copy to the GPU machine)
   remote.py       SSH: test server, upload, start detached, status, stop, download
+  evaluate.py     training summary per model, model.val on clean / augmented / train sets
   predict.py      ultralytics model cache and inference
   server.py       FastAPI API and static UI
   web/            index.html, app.js (state/UI), canvas.js (viewer/box editor)

@@ -385,3 +385,49 @@ def test_remote_upload_check_status(tmp_path, fake_server):
 
     with pytest.raises(remote.RemoteError, match="Cannot connect"):
         remote.test(remote.Server("unreachable"))
+
+
+def test_eval_sets_and_yaml(tmp_path):
+    p = _small_dataset(tmp_path, n=6)
+    assert set(p.eval_sets()) == {"all"}  # no split yet
+    p.write_data_yaml(0.34, seed=0, source="existing")
+    p.augment(["rot90"], train=True, val=True)
+    sets = p.eval_sets()
+    assert {k: len(v) for k, v in sets.items()} == {"all": 6, "val": 2, "train": 4, "val_aug": 2}
+    assert not any("__" in x.name for x in sets["val"] + sets["train"])  # clean sets: no copies
+    y, n = p.eval_yaml("val_aug")
+    assert n == 2 and "val: val_aug.txt" in y.read_text()
+    assert all(Path(x).is_file() for x in (y.parent / "val_aug.txt").read_text().split())
+    with pytest.raises(ValueError):
+        p.eval_yaml("nope")
+
+
+def test_run_info_reads_run_folder(tmp_path):
+    from imobj_labeler.evaluate import run_info
+
+    run = tmp_path / "train_x"
+    (run / "weights").mkdir(parents=True)
+    (run / "weights" / "best.pt").write_bytes(b"x")
+    (run / "args.yaml").write_text("model: weights_init/start.pt\nepochs: 50\nimgsz: 256\nbatch: 16\n")
+    (run / "results.csv").write_text("  epoch,  metrics/mAP50(B),  metrics/mAP50-95(B)\n"
+                                     "  1, 0.5, 0.3\n  2, 0.8, 0.6\n  3, 0.7, 0.5\n")
+    (run / "training_data.json").write_text(
+        '{"training_end_time": "2026-11-10_10-00-00", "bundle": "/b/x_bundle",'
+        ' "environment": {"gpu": "A100", "ultralytics": "8.3.40"}}')
+    i = run_info(run / "weights" / "best.pt")
+    assert (i["run"], i["epochs"], i["epochs_done"], i["imgsz"]) == ("train_x", 50, 3, 256)
+    assert i["best"]["epoch"] == 2 and i["start_model"] == "start.pt"
+    assert (i["gpu"], i["ultralytics"], i["bundle"]) == ("A100", "8.3.40", "x_bundle")
+    assert run_info(tmp_path / "train_x" / "weights" / "best.pt")["file"] == "best.pt"
+
+
+MODEL68 = ROOT / "to_ignore" / "yolo_models" / "train68" / "weights" / "best.pt"
+
+
+@pytest.mark.skipif(not MODEL68.is_file(), reason="sample model not present")
+def test_evaluate_model_records_history(tmp_path):
+    pytest.importorskip("ultralytics")
+    p = _small_dataset(tmp_path, n=4)
+    r = p.evaluate_model(str(MODEL68), "all")
+    assert r["n_images"] == 4 and 0 <= r["map"] <= 1 and r["imgsz"] == 256
+    assert p.eval_history()[-1]["model"] == str(MODEL68)
